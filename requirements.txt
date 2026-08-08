@@ -6,5 +6,5 @@ python-dotenv
 python-multipart
 sqlalchemy
 asyncpg
-"pyjwt[crypto]"
+pyjwt[crypto]
 gunicorn
