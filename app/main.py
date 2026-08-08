@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, Depends
 from app.routers import foods, logs, insights
 from app.core.security import get_current_user_id
@@ -18,9 +20,11 @@ app.include_router(logs.router)
 app.include_router(targets.router)
 app.include_router(insights.router)
 
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[frontend_url],
     allow_methods=["*"],
     allow_headers=["*"],
 )
