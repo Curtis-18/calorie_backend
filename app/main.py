@@ -1,7 +1,7 @@
 import os
 
 from fastapi import FastAPI, Depends
-from app.routers import foods, logs, insights
+from app.routers import foods, logs, insights, photo_estimation
 from app.core.security import get_current_user_id
 from app.routers import targets
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +19,7 @@ app.include_router(foods.router)
 app.include_router(logs.router)
 app.include_router(targets.router)
 app.include_router(insights.router)
+app.include_router(photo_estimation.router)
 
 frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
