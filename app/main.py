@@ -1,19 +1,36 @@
-import os
+import logging
 
-from fastapi import FastAPI, Depends
-from app.routers import foods, logs, insights, photo_estimation
-from app.core.security import get_current_user_id
-from app.routers import targets
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-# Ensures all models are registered on Base.metadata before any request
-# triggers mapper configuration. Without this, FK resolution to "profiles"
-# fails at commit time if nothing else in the import chain touches
-# models/user.py directly.
-from app.models import user, target, food_log, insights_cache  # noqa: F401
-#from app.models import user, target, food_log, insights_cache  # noqa: F401
+from app.core.config import settings
+from app.core.database import get_db
+from app.core.security import get_current_user_id
+from app.routers import foods, insights, logs, photo_estimation, targets
 
-app = FastAPI(title="Calorie Backend")
+# Import every model before the app serves traffic so Base.metadata knows
+# about all tables and FK targets resolve.
+from app.models import food_log, insights_cache, target, user  # noqa: F401
+
+log = logging.getLogger("calorie_backend")
+
+app = FastAPI(
+    title="Calorie Backend",
+    # Trailing slashes would make /logs/ 404 against the client's /logs.
+    redirect_slashes=False,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    # A single hardcoded origin meant every deployed frontend origin was
+    # rejected: browsers block the response before the app ever sees it.
+    allow_origins=settings.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 app.include_router(foods.router)
 app.include_router(logs.router)
@@ -21,20 +38,23 @@ app.include_router(targets.router)
 app.include_router(insights.router)
 app.include_router(photo_estimation.router)
 
-frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[frontend_url],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 @app.get("/")
 async def root():
     return {"status": "ok"}
 
 
+@app.get("/health")
+async def health(db: AsyncSession = Depends(get_db)):
+    """Liveness plus a real DB round-trip, so Render restarts us if the pooler dies."""
+    try:
+        await db.execute(text("select 1"))
+    except Exception as exc:  # noqa: BLE001 - never leak driver internals to the probe
+        log.exception("health check failed")
+        return {"status": "degraded", "database": "unreachable", "detail": type(exc).__name__}, 503
+    return {"status": "ok", "database": "ok"}
+
+
 @app.get("/me")
-def me(user_id: str = Depends(get_current_user_id)):
-    return {"user_id": user_id}
+async def me(user_id: str = Depends(get_current_user_id)):
+    return {"user_id": str(user_id)}

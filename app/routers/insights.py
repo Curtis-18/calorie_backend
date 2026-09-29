@@ -1,4 +1,5 @@
-from datetime import date as date_type, datetime
+import uuid
+from datetime import date as date_type, datetime, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/insights", tags=["insights"])
 @router.get("", response_model=InsightsOut)
 async def get_insights(
     refresh: bool = False,
-    user_id: str = Depends(get_current_user_id),
+    user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     today = date_type.today()
@@ -33,7 +34,7 @@ async def get_insights(
     trend = await get_weekly_trend(db, user_id)
     payload = await generate_insights(db, user_id, trend)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     stmt = pg_insert(InsightsCache).values(
         user_id=user_id, date=today, payload=payload, generated_at=now
     ).on_conflict_do_update(

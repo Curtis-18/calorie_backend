@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import date as date_type, timedelta
 
 import httpx
@@ -8,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.food_log import FoodLog
 from app.models.target import Target
+
+log = logging.getLogger("calorie_backend")
 
 INSIGHTS_PROMPT_TEMPLATE = """You are a nutrition coach reviewing one user's food log.
 
@@ -92,14 +95,24 @@ async def generate_insights(db: AsyncSession, user_id: str, trend: list[dict]) -
             json=payload,
             timeout=30.0,
         )
+        if response.status_code >= 400:
+            log.error("gemini error %s: %s", response.status_code, response.text[:500])
         response.raise_for_status()
         data = response.json()
 
-    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("gemini returned no candidates for insights")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    raw_text = "".join(p.get("text", "") for p in parts if p.get("text"))
+    if not raw_text.strip():
+        raise RuntimeError("gemini returned an empty insights response")
     parsed = json.loads(raw_text)
 
+    tips = [t for t in (parsed.get("tips") or []) if isinstance(t, str)][:5]
+
     return {
-        "narrative": parsed.get("narrative", ""),
-        "tips": parsed.get("tips", []),
+        "narrative": parsed.get("narrative") or "",
+        "tips": tips,
         "weekly_trend": trend,
     }

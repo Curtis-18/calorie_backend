@@ -1,23 +1,29 @@
+import uuid
 from datetime import date as date_type
 
-from fastapi import APIRouter, UploadFile, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.photo import DetectedFoodItem, PhotoAnalysisResponse
+from app.core.database import get_db
+from app.core.security import get_current_user_id
 from app.models.food_log import FoodLog
+from app.models.photo import DetectedFoodItem, PhotoAnalysisResponse
 from app.schemas.food_log import FoodLogIn, FoodLogOut
 from app.services.gemini_service import identify_foods
 from app.services.usda_service import get_best_match
-from app.core.security import get_current_user_id
-from app.core.database import get_db
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
+
 @router.post("/analyze-photo", response_model=PhotoAnalysisResponse)
-async def analyze_photo(photo: UploadFile, user_id: str = Depends(get_current_user_id)):
+async def analyze_photo(
+    photo: UploadFile,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
     image_bytes = await photo.read()
-    detected = await identify_foods(image_bytes, photo.content_type)
+    detected = await identify_foods(image_bytes, photo.content_type or "image/jpeg")
 
     def scale(per_100g: float | None, grams: float) -> float | None:
         return (per_100g / 100) * grams if per_100g is not None else None
@@ -27,31 +33,28 @@ async def analyze_photo(photo: UploadFile, user_id: str = Depends(get_current_us
         match = await get_best_match(food["name"])
         grams = food["estimated_grams"]
 
-        calories_per_100g = match.calories_per_100g if match else None
-        protein_per_100g = match.protein_g_per_100g if match else None
-        carbs_per_100g = match.carbs_g_per_100g if match else None
-        fat_per_100g = match.fat_g_per_100g if match else None
-
         items.append(
             DetectedFoodItem(
                 name=food["name"],
                 estimated_grams=grams,
-                calories_per_100g=calories_per_100g,
-                estimated_calories=scale(calories_per_100g, grams),
-                protein_g_per_100g=protein_per_100g,
-                estimated_protein_g=scale(protein_per_100g, grams),
-                carbs_g_per_100g=carbs_per_100g,
-                estimated_carbs_g=scale(carbs_per_100g, grams),
-                fat_g_per_100g=fat_per_100g,
-                estimated_fat_g=scale(fat_per_100g, grams),
+                calories_per_100g=match.calories_per_100g if match else None,
+                estimated_calories=scale(match.calories_per_100g if match else None, grams),
+                protein_g_per_100g=match.protein_g_per_100g if match else None,
+                estimated_protein_g=scale(match.protein_g_per_100g if match else None, grams),
+                carbs_g_per_100g=match.carbs_g_per_100g if match else None,
+                estimated_carbs_g=scale(match.carbs_g_per_100g if match else None, grams),
+                fat_g_per_100g=match.fat_g_per_100g if match else None,
+                estimated_fat_g=scale(match.fat_g_per_100g if match else None, grams),
             )
         )
 
     return PhotoAnalysisResponse(items=items)
+
+
 @router.post("", response_model=FoodLogOut, status_code=201)
 async def create_log(
     data: FoodLogIn,
-    user_id: str = Depends(get_current_user_id),
+    user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     entry = FoodLog(
@@ -68,30 +71,40 @@ async def create_log(
         timestamp=data.timestamp,
     )
     db.add(entry)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        # The id is client-generated, so a retry after a dropped response
+        # lands on the primary key. Report it as a conflict, not a 500.
+        raise HTTPException(status_code=409, detail="Log with this id already exists")
     await db.refresh(entry)
     return entry
+
 
 @router.get("/today", response_model=list[FoodLogOut])
 async def get_today_logs(
     date: date_type,
-    user_id: str = Depends(get_current_user_id),
+    user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
         select(FoodLog).where(FoodLog.user_id == user_id, FoodLog.log_date == date)
     )
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 @router.delete("/{log_id}", status_code=204)
 async def delete_log(
     log_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     entry = await db.get(FoodLog, log_id)
-    if entry is None or str(entry.user_id) != user_id:
+    # get_current_user_id hands back a UUID. Comparing it against a str made
+    # this condition unconditionally true, so every delete 404'd.
+    if entry is None or entry.user_id != user_id:
         raise HTTPException(status_code=404, detail="Log not found")
     await db.delete(entry)
     await db.commit()
+    return None

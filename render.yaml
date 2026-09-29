@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: calorie-backend
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    # gunicorn's default sync worker cannot serve an ASGI app: every request
+    # dies with "FastAPI.__call__() missing 1 required positional argument:
+    # 'send'". The UvicornWorker class is the ASGI-compatible one.
+    startCommand: >-
+      gunicorn app.main:app
+      --worker-class uvicorn.workers.UvicornWorker
+      --workers 2
+      --bind 0.0.0.0:$PORT
+      --timeout 120
+      --access-logfile -
+      --error-logfile -
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.5"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Secrets go in the Render dashboard, not in this file.
+      - key: USDA_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      # Must be the asyncpg URL. The app rewrites a bare postgresql:// one
+      # automatically, but the pooled 6543 port is the right choice anyway.
+      - key: DATABASE_URL
+        sync: false
+      # Comma separated list of allowed web origins.
+      - key: CORS_ORIGINS
+        sync: false

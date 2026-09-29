@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FoodLogIn(BaseModel):
@@ -17,6 +17,8 @@ class FoodLogIn(BaseModel):
 
 
 class FoodLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     calories: int
@@ -26,6 +28,4 @@ class FoodLogOut(BaseModel):
     meal_type: str
     source: str
     timestamp: datetime
-
-    class Config:
-        from_attributes = True
+    log_date: date

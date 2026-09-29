@@ -1,8 +1,54 @@
+import logging
+
 import httpx
+
 from app.core.config import settings
 from app.models.food import FoodSearchResult
 
+log = logging.getLogger("calorie_backend")
+
+# USDA spells these inconsistently across data types; match the variants that
+# actually show up so a result doesn't silently come back with null macros.
+_NUTRIENT_ALIASES = {
+    "calories": {"Energy"},
+    "protein_g": {"Protein"},
+    "fat_g": {"Total lipid (fat)", "Total lipid (fat) (NLEA)"},
+    "carbs_g": {"Carbohydrate, by difference", "Carbohydrate, by difference (NLEA)"},
+}
+
+
+def _extract_nutrients(food: dict) -> dict:
+    nutrients: dict = {key: None for key in _NUTRIENT_ALIASES}
+    seen: set[str] = set()
+
+    for nutrient in food.get("foodNutrients") or []:
+        name = nutrient.get("nutrientName")
+        unit = nutrient.get("unitName")
+        value = nutrient.get("value")
+        if not name or value is None:
+            continue
+
+        if name in _NUTRIENT_ALIASES["calories"] and unit == "KCAL" and "calories" not in seen:
+            nutrients["calories"] = float(value)
+            seen.add("calories")
+            continue
+
+        for key, aliases in _NUTRIENT_ALIASES.items():
+            if key == "calories" or key in seen:
+                continue
+            if name in aliases:
+                nutrients[key] = float(value)
+                seen.add(key)
+                break
+
+    return nutrients
+
+
 async def search_foods(query: str) -> list[FoodSearchResult]:
+    query = query.strip()
+    if not query:
+        return []
+
     params = {
         "api_key": settings.usda_api_key,
         "query": query,
@@ -14,34 +60,22 @@ async def search_foods(query: str) -> list[FoodSearchResult]:
             f"{settings.usda_base_url}/foods/search",
             params=params,
         )
+        if response.status_code >= 400:
+            log.error("usda error %s: %s", response.status_code, response.text[:500])
         response.raise_for_status()
         data = response.json()
 
     results = []
-    for food in data.get("foods", []):
-        nutrients = {
-            "calories_per_100g": None,
-            "protein_g_per_100g": None,
-            "carbs_g_per_100g": None,
-            "fat_g_per_100g": None,
-        }
-
-        for nutrient in food.get("foodNutrients", []):
-            name = nutrient.get("nutrientName")
-            if name == "Energy" and nutrient.get("unitName") == "KCAL":
-                nutrients["calories_per_100g"] = nutrient.get("value")
-            elif name == "Protein":
-                nutrients["protein_g_per_100g"] = nutrient.get("value")
-            elif name == "Total lipid (fat)":
-                nutrients["fat_g_per_100g"] = nutrient.get("value")
-            elif name == "Carbohydrate, by difference":
-                nutrients["carbs_g_per_100g"] = nutrient.get("value")
-
+    for food in data.get("foods") or []:
+        fdc_id = food.get("fdcId")
+        description = food.get("description")
+        if fdc_id is None or not description:
+            continue
         results.append(
             FoodSearchResult(
-                fdc_id=food["fdcId"],
-                description=food["description"],
-                **nutrients,
+                fdc_id=fdc_id,
+                description=description,
+                **_extract_nutrients(food),
             )
         )
 
