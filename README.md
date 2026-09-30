@@ -15,7 +15,12 @@ deliberately **not** in the repo — see `.env.example` for the full list):
 | `DATABASE_URL` | Supabase connection string. A bare `postgresql://` URL is rewritten to `postgresql+asyncpg://` on startup. |
 | `USDA_API_KEY` | USDA FoodData Central key |
 | `GEMINI_API_KEY` | Google AI Studio key |
-| `CORS_ORIGINS` | Comma separated list of allowed web origins. **Set this**, otherwise a deployed frontend is blocked by the browser. |
+| `CORS_ORIGINS` | Comma separated list of allowed web origins. **Set this**, otherwise a deployed frontend is blocked by the browser. An entry may use `*` as a host wildcard, e.g. `https://my-app-*.vercel.app` to cover the production origin and every Vercel preview deploy at once. |
+
+If `CORS_ORIGINS` is left unset the list stays localhost-only, and a deployed
+frontend sees `400 Disallowed CORS origin` in the Render log for every request.
+Flutter reports that as "Could not reach the server", which reads like a network
+problem rather than a configuration one.
 
 The app fails fast on boot if any of the first four are missing, so a
 misconfigured deploy reports the problem immediately instead of 500ing on

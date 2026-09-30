@@ -6,6 +6,85 @@ def test_health_and_root_are_open(client):
     assert client.get("/").json() == {"status": "ok"}
 
 
+def _preflight(cors_origins: str, origin: str):
+    """A real OPTIONS round-trip through the middleware the app installs.
+
+    This is the request the browser makes before every authenticated call, and
+    the one that was answering "400 Disallowed CORS origin" in the Render log.
+    """
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.testclient import TestClient
+
+    from app.core.config import Settings
+    from app.main import cors_kwargs
+
+    cors = Settings(
+        _env_file=None,
+        usda_api_key="x",
+        gemini_api_key="x",
+        supabase_url="https://x.supabase.co",
+        database_url="postgresql+asyncpg://u:p@h/db",
+        cors_origins=cors_origins,
+    )
+    app = FastAPI()
+    app.add_middleware(CORSMiddleware, **cors_kwargs(cors))
+
+    @app.get("/targets")
+    async def targets():
+        return {"targets": []}
+
+    with TestClient(app) as client:
+        return client.options(
+            "/targets",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+
+
+def test_exact_origin_passes_preflight():
+    r = _preflight("https://app.example.com", "https://app.example.com")
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "https://app.example.com"
+
+
+def test_vercel_preview_origin_passes_preflight():
+    """Every preview deploy gets a new subdomain, so one wildcard has to cover them."""
+    r = _preflight(
+        "https://app.example.com,https://calorie-app-*.vercel.app",
+        "https://calorie-app-a1b2c3-curtis.vercel.app",
+    )
+    assert r.status_code == 200
+    assert (
+        r.headers["access-control-allow-origin"]
+        == "https://calorie-app-a1b2c3-curtis.vercel.app"
+    )
+
+
+def test_unlisted_origin_is_refused_with_400():
+    """This is the response the client saw and reported as a network failure."""
+    r = _preflight("http://localhost:3000", "https://calorie-app.vercel.app")
+    assert r.status_code == 400
+    assert "Disallowed CORS origin" in r.text
+
+
+def test_spoofed_origin_under_an_allowed_wildcard_is_refused():
+    r = _preflight(
+        "https://calorie-app-*.vercel.app",
+        "https://calorie-app-x.vercel.app.evil.test",
+    )
+    assert r.status_code == 400
+
+
+def test_origin_pasted_with_a_trailing_slash_still_works():
+    """The dashboard is full of copyable URLs, and every one of them has a slash."""
+    r = _preflight("https://calorie-app-ug.vercel.app/", "https://calorie-app-ug.vercel.app")
+    assert r.status_code == 200
+
+
 def test_every_data_route_requires_auth(anon_client):
     client = anon_client
     """A missing bearer token must never reach business logic."""

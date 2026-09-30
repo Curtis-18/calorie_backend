@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.routers import foods, insights, logs, photo_estimation, targets
@@ -16,21 +16,32 @@ from app.models import food_log, insights_cache, target, user  # noqa: F401
 
 log = logging.getLogger("calorie_backend")
 
+
+def cors_kwargs(cors: Settings) -> dict:
+    """CORS config in one place, so tests exercise the real wiring.
+
+    Origins come from CORS_ORIGINS. A hardcoded single origin meant every
+    deployed frontend was rejected: the browser blocks the response before the
+    app ever sees it, and the client reports a network failure rather than the
+    400 the server actually returned. Entries containing `*` are matched as
+    host wildcards, which is what keeps Vercel preview deploys working.
+    """
+    return {
+        "allow_origins": cors.exact_origins,
+        "allow_origin_regex": cors.cors_origin_regex,
+        "allow_credentials": True,
+        "allow_methods": ["GET", "POST", "DELETE", "OPTIONS"],
+        "allow_headers": ["Authorization", "Content-Type"],
+    }
+
+
 app = FastAPI(
     title="Calorie Backend",
     # Trailing slashes would make /logs/ 404 against the client's /logs.
     redirect_slashes=False,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    # A single hardcoded origin meant every deployed frontend origin was
-    # rejected: browsers block the response before the app ever sees it.
-    allow_origins=settings.allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-)
+app.add_middleware(CORSMiddleware, **cors_kwargs(settings))
 
 app.include_router(foods.router)
 app.include_router(logs.router)
