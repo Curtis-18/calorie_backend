@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # An entry may contain `*` as a wildcard host segment; Vercel hands every
     # preview deploy a new subdomain, and an exact-match list would reject
     # each one with a 400 "Disallowed CORS origin".
-    cors_origins: str = "http://localhost:3000,http://localhost:8080"
+    cors_origins: str = "http://localhost:3000,http://localhost:8080,https://calorie-app-*.vercel.app"
 
     # Ceiling for the base64 photo payload on /estimate-photo.
     max_photo_bytes: int = 8 * 1024 * 1024
