@@ -1,16 +1,12 @@
 import json
-import logging
 from datetime import date as date_type, timedelta
 
-import httpx
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.models.food_log import FoodLog
 from app.models.target import Target
-
-log = logging.getLogger("calorie_backend")
+from app.services.gemini_client import generate_content
 
 INSIGHTS_PROMPT_TEMPLATE = """You are a nutrition coach reviewing one user's food log.
 
@@ -86,19 +82,7 @@ async def generate_insights(db: AsyncSession, user_id: str, trend: list[dict]) -
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"response_mime_type": "application/json"},
     }
-    url = f"{settings.gemini_base_url}/models/{settings.gemini_model}:generateContent"
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            url,
-            params={"key": settings.gemini_api_key},
-            json=payload,
-            timeout=30.0,
-        )
-        if response.status_code >= 400:
-            log.error("gemini error %s: %s", response.status_code, response.text[:500])
-        response.raise_for_status()
-        data = response.json()
+    data = await generate_content(payload)
 
     candidates = data.get("candidates") or []
     if not candidates:
@@ -114,5 +98,32 @@ async def generate_insights(db: AsyncSession, user_id: str, trend: list[dict]) -
     return {
         "narrative": parsed.get("narrative") or "",
         "tips": tips,
+        "weekly_trend": trend,
+    }
+
+
+FALLBACK_NARRATIVE = (
+    "Your AI coach is taking a quick break — the analysis service is busy right "
+    "now. Your week's trends are below; pull down to refresh in a moment for "
+    "fresh tips."
+)
+
+FALLBACK_TIPS = [
+    "Log meals as you eat them so today's numbers stay accurate.",
+    "Include a protein source at every meal to stay full between them.",
+    "A glass of water before meals helps keep appetite in check.",
+]
+
+
+def degraded_insights(trend: list[dict]) -> dict:
+    """A usable payload when Gemini is unreachable.
+
+    The weekly trend is computed from our own logs, so the chart still renders;
+    only the AI narrative and tips are replaced with an honest placeholder
+    instead of failing the whole request with a 500.
+    """
+    return {
+        "narrative": FALLBACK_NARRATIVE,
+        "tips": list(FALLBACK_TIPS),
         "weekly_trend": trend,
     }

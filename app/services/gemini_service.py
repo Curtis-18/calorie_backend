@@ -1,12 +1,7 @@
 import base64
 import json
-import logging
 
-import httpx
-
-from app.core.config import settings
-
-log = logging.getLogger("calorie_backend")
+from app.services.gemini_client import generate_content
 
 PROMPT = """Identify each distinct food item visible in this image.
 For each item, estimate its portion size in grams.
@@ -80,18 +75,6 @@ async def identify_foods(image_bytes: bytes, mime_type: str) -> list[dict]:
         "generationConfig": _API_ERRORS,
     }
 
-    url = f"{settings.gemini_base_url}/models/{settings.gemini_model}:generateContent"
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            url,
-            params={"key": settings.gemini_api_key},
-            json=payload,
-            timeout=30.0,
-        )
-        if response.status_code >= 400:
-            log.error("gemini error %s: %s", response.status_code, response.text[:500])
-        response.raise_for_status()
-        data = response.json()
+    data = await generate_content(payload)
 
     return _extract_items(data)
