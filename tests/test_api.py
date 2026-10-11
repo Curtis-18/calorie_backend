@@ -125,6 +125,22 @@ def test_estimate_photo_requires_the_field(client):
     assert client.post("/estimate-photo", json={}).status_code == 422
 
 
+def test_analyze_photo_upstream_failure_returns_502(client, monkeypatch):
+    """A Gemini outage must be a clean 502, not an unhandled 500 that the
+    browser reports as 'Failed to fetch' because it lacks CORS headers."""
+    from app.routers import logs
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("gemini down")
+
+    monkeypatch.setattr(logs, "identify_foods", boom)
+    r = client.post(
+        "/logs/analyze-photo",
+        files={"photo": ("meal.jpg", b"fake-bytes", "image/jpeg")},
+    )
+    assert r.status_code == 502
+
+
 def test_food_search_empty_query_returns_empty_list(client):
     r = client.get("/foods/search?query=")
     assert r.status_code == 200

@@ -22,6 +22,22 @@ log = logging.getLogger("calorie_backend")
 router = APIRouter(prefix="/insights", tags=["insights"])
 
 
+def _utcnow_naive() -> datetime:
+    """UTC now with the tzinfo stripped.
+
+    `insights_cache.generated_at` is a TIMESTAMP WITHOUT TIME ZONE, and asyncpg
+    refuses to bind an aware datetime to one: "can't subtract offset-naive and
+    offset-aware datetimes". Store naive UTC, which is what the column means.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalise a value read back from that naive column so the API always
+    reports an explicit UTC offset."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 @router.get("", response_model=InsightsOut)
 async def get_insights(
     refresh: bool = False,
@@ -35,7 +51,9 @@ async def get_insights(
     )
     cached = result.scalar_one_or_none()
     if not refresh and cached and cached.date == today:
-        return InsightsOut(**cached.payload, generated_at=cached.generated_at)
+        return InsightsOut(
+            **cached.payload, generated_at=_as_utc(cached.generated_at)
+        )
 
     trend = await get_weekly_trend(db, user_id)
     try:
@@ -48,19 +66,30 @@ async def get_insights(
         if cached and cached.payload:
             payload = dict(cached.payload)
             payload["weekly_trend"] = trend
-            return InsightsOut(**payload, generated_at=cached.generated_at)
+            return InsightsOut(
+                **payload, generated_at=_as_utc(cached.generated_at)
+            )
         return InsightsOut(
             **degraded_insights(trend), generated_at=datetime.now(timezone.utc)
         )
 
     now = datetime.now(timezone.utc)
-    stmt = pg_insert(InsightsCache).values(
-        user_id=user_id, date=today, payload=payload, generated_at=now
-    ).on_conflict_do_update(
-        index_elements=["user_id"],
-        set_={"date": today, "payload": payload, "generated_at": now},
-    )
-    await db.execute(stmt)
-    await db.commit()
+    try:
+        stmt = pg_insert(InsightsCache).values(
+            user_id=user_id,
+            date=today,
+            payload=payload,
+            generated_at=_utcnow_naive(),
+        ).on_conflict_do_update(
+            index_elements=["user_id"],
+            set_={"date": today, "payload": payload, "generated_at": _utcnow_naive()},
+        )
+        await db.execute(stmt)
+        await db.commit()
+    except Exception:  # noqa: BLE001 - caching is best-effort
+        # The insights are already generated; a full cache or a write error
+        # should not turn a successful analysis into a 500.
+        await db.rollback()
+        log.exception("failed to cache insights; returning the fresh result")
 
     return InsightsOut(**payload, generated_at=now)
