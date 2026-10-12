@@ -131,7 +131,125 @@ The dashboard manages meals under four categories: **Breakfast**, **Lunch**, **D
 
 ---
 
-## 4. Current State of the Codebase
+## 4. Deep-Dive: Calorie & Macronutrient Calculation Engine (Logic & Thought Process)
+
+The nutritional target calculator is located in backend [`app/services/target_calculator.py`](file:///home/curtis/calorie_backend/app/services/target_calculator.py) and validated in [`tests/test_target_calculator.py`](file:///home/curtis/calorie_backend/tests/test_target_calculator.py). It converts raw onboarding parameters (DOB, sex, height, weight, activity level, goal) into medically grounded daily calorie targets and macro partitions.
+
+### 4.1 Input Normalization & Age Resolution
+1. **Height Normalization:** Converts imperial feet and inches to metric centimeters:
+   $$\text{height}_{\text{cm}} = (\text{feet} \times 12 + \text{inches}) \times 2.54$$
+2. **Weight Normalization:** Imperial pounds are converted to kilograms:
+   $$\text{weight}_{\text{kg}} = \text{weight}_{\text{lb}} \times 0.45359237$$
+3. **Exact Calendar Age:** Rather than naive year subtraction ($Y_{\text{now}} - Y_{\text{dob}}$), `calculate_age(dob, today)` evaluates if the user's birth anniversary has already occurred in the current calendar year. If not, age is decremented by 1.
+
+---
+
+### 4.2 Basal Metabolic Rate (BMR) — The Mifflin-St Jeor Equation
+The engine relies on the **Mifflin-St Jeor formula** (1990), which has been clinically demonstrated to be more reliable and accurate across diverse body compositions than the older Harris-Benedict equation:
+
+$$\text{BMR}_{\text{base}} = (10 \times \text{weight}_{\text{kg}}) + (6.25 \times \text{height}_{\text{cm}}) - (5 \times \text{age})$$
+
+- **Male:** $\text{BMR} = \text{BMR}_{\text{base}} + 5$
+- **Female:** $\text{BMR} = \text{BMR}_{\text{base}} - 161$
+
+*Thought Process & Rationale:* Sex-specific adjustments account for differences in average lean body mass and essential adiposity between males and females.
+
+---
+
+### 4.3 Total Daily Energy Expenditure (TDEE) & Physical Activity Levels (PAL)
+BMR is scaled by standard FAO/WHO/UNU Physical Activity Level multipliers:
+
+| Activity Level | Multiplier | Clinical Interpretation |
+|---|---|---|
+| `sedentary` | $\times 1.2$ | Desk-bound work, little to no intentional exercise |
+| `light` | $\times 1.375$ | Light physical work or exercise 1–3 days per week |
+| `moderate` | $\times 1.55$ | Moderate exercise or sports 3–5 days per week |
+| `active` | $\times 1.725$ | Hard training or sports 6–7 days per week |
+| `very_active` | $\times 1.90$ | Heavy physical labor or twice-daily intensive training |
+
+$$\text{TDEE} = \text{BMR} \times \text{ACTIVITY\_MULTIPLIERS}[\text{activity\_level}]$$
+
+---
+
+### 4.4 Caloric Goal Adjustment & Safety Floor
+Energy intake is adjusted based on the user's primary goal:
+
+- **Lose Weight (`lose`):** $-500\text{ kcal}$
+  - *Thought Process:* A daily deficit of $500\text{ kcal}$ equals a cumulative $3,500\text{ kcal}$ deficit per week, which corresponds to approximately $0.45\text{ kg}$ ($1\text{ lb}$) of sustainable body fat loss per week without precipitating metabolic slowdown or severe hunger.
+- **Maintain Weight (`maintain`):** $0\text{ kcal}$ (energy balance).
+- **Gain Weight (`gain`):** $+500\text{ kcal}$
+  - *Thought Process:* Provides a controlled hypercaloric surplus sufficient to support muscular hypertrophy while minimizing concurrent adipose storage.
+
+#### The 1200 kcal Safety Floor (`MIN_SAFE_CALORIE_TARGET`)
+$$\text{Calorie Target} = \max\left(\text{round}(\text{TDEE} + \Delta_{\text{goal}}), 1200\right)$$
+
+*Thought Process & Rationale:* For short, sedentary individuals (e.g. small females with lower BMR), subtracting 500 kcal could produce dangerously low targets (800–1000 kcal). Prolonged consumption below 1200 kcal can lead to nutrient deficiencies, gallstones, muscle loss, and severe metabolic adaptation. The engine strictly enforces a 1200 kcal baseline floor.
+
+---
+
+### 4.5 Macronutrient Partitioning Architecture & Thought Process
+
+Energy densities used throughout the calculation:
+- **Protein:** $4\text{ kcal / g}$
+- **Carbohydrates:** $4\text{ kcal / g}$
+- **Fat:** $9\text{ kcal / g}$
+
+The macronutrient distribution uses a hierarchical priority system: **Protein is prioritized first (anchored to bodyweight), Fat is allocated second (as an essential hormonal percentage of total calories), and Carbohydrates absorb the remaining caloric balance.**
+
+#### 1. Protein Allocation (Bodyweight-Anchored)
+- `lose`: $2.0\text{ g / kg}$ bodyweight.
+  - *Rationale:* Caloric restriction triggers protein breakdown. Higher protein preserves lean muscle mass during energy deficits and increases satiety through the Thermic Effect of Food (TEF).
+- `maintain`: $1.6\text{ g / kg}$ bodyweight.
+  - *Rationale:* The optimal baseline for active individuals maintaining physical composition.
+- `gain`: $1.8\text{ g / kg}$ bodyweight.
+  - *Rationale:* Maximizes muscle protein synthesis (MPS) without crowding out carbohydrates necessary for high-intensity training.
+- **Safety Bounds:** Clamped between `MIN_PROTEIN_KG = 0.8` (RDA minimum) and `MAX_PROTEIN_KG = 2.2` (upper threshold for natural protein synthesis efficiency).
+$$\text{Protein (g)} = \text{round}(\text{weight}_{\text{kg}} \times \text{protein\_per\_kg})$$
+
+#### 2. Fat Allocation (Calorie-Anchored Percentage)
+Dietary fat is critical for hormone synthesis (testosterone, estrogen), cell membrane integrity, and fat-soluble vitamin (A, D, E, K) absorption:
+- `lose`: $25\%$ of total daily calories.
+- `maintain`: $30\%$ of total daily calories.
+- `gain`: $25\%$ of total daily calories.
+- **Safety Bound:** Capped at $35\%$ (`MAX_FAT_PERCENT = 0.35`) so fats never consume the entire caloric allowance.
+$$\text{Fat (g)} = \text{round}\left(\frac{\text{Calorie Target} \times \min(\text{FatPercent}, 0.35)}{9}\right)$$
+
+#### 3. Carbohydrate Allocation (Residual Calorie Pool)
+Carbohydrates fuel glycogen repletion, physical stamina, and cognitive function. They receive the remaining calories after protein and fat are satisfied:
+$$\text{Remaining kcal} = \text{Calorie Target} - (\text{Protein}_{\text{g}} \times 4) - (\text{Fat}_{\text{g}} \times 9)$$
+$$\text{Carbs (g)} = \max\left(50, \text{round}\left(\frac{\text{Remaining kcal}}{4}\right)\right)$$
+
+*The 50g Carb Floor (`MIN_CARBS_G = 50`):* Prevents unintentional ketosis, brain fog, and severe lethargy on aggressive cuts.
+
+#### 4. Overflow Detection & Deficit Rebalancing (The Anti-Negative-Carb Engine)
+*The Mathematical Edge Case Discovered:*
+On a strict $1200\text{ kcal}$ floor with an aggressive cut, a user's calculated protein requirement ($2.0\text{ g/kg}$) plus fat floor ($25\% = 300\text{ kcal}$) plus the $50\text{ g}$ carb floor ($200\text{ kcal}$) could sum to more than $1200\text{ kcal}$, causing remaining carbohydrates to calculate as negative or macro totals to blow past the budget.
+
+*The Engine's Automated Rebalancing Solution:*
+1. Computes total macro energy:
+   $$\text{overflow} = (\text{Protein}_{\text{g}} \times 4 + \text{Fat}_{\text{g}} \times 9 + \text{Carbs}_{\text{g}} \times 4) - \text{Calorie Target}$$
+2. If $\text{overflow} > 0$:
+   - Fat is trimmed first (since fat is caloric-dense at 9 kcal/g and protein must be preserved to protect muscle):
+     $$\text{trim}_{\text{g}} = \text{round}\left(\frac{\text{overflow}}{9}\right)$$
+     $$\text{Fat}_{\text{g}} = \max(0, \text{Fat}_{\text{g}} - \text{trim}_{\text{g}})$$
+   - Carbs are then recalculated with whatever calories remain:
+     $$\text{Remaining kcal} = \text{Calorie Target} - (\text{Protein}_{\text{g}} \times 4) - (\text{Fat}_{\text{g}} \times 9)$$
+     $$\text{Carbs (g)} = \max\left(50, \text{round}\left(\frac{\text{Remaining kcal}}{4}\right)\right)$$
+
+This mathematical guarantee ensures that:
+- Every macro is strictly positive ($\ge 0$).
+- Carbohydrates never drop below $50\text{ g}$.
+- Total macronutrient calories stay within a $105\%$ rounding tolerance of the target calorie ceiling.
+
+---
+
+### 4.6 Body Mass Index (BMI) & Metric Calculation
+$$\text{BMI} = \frac{\text{weight}_{\text{kg}}}{(\text{height}_{\text{m}})^2} = \frac{\text{weight}_{\text{kg}}}{\left(\frac{\text{height}_{\text{cm}}}{100}\right)^2}$$
+Calculated on the fly and returned rounded to 1 decimal place alongside BMR, TDEE, Calorie Target, and Macro grams.
+
+---
+
+## 5. Current State of the Codebase
 
 ### 4.1 Backend (`/home/curtis/calorie_backend`)
 
@@ -172,7 +290,7 @@ The dashboard manages meals under four categories: **Breakfast**, **Lunch**, **D
 
 ---
 
-## 5. Critical Issues, Inconsistencies & "What Seems Off"
+## 6. Critical Issues, Inconsistencies & "What Seems Off"
 
 During our comprehensive audit of both repositories, several significant discrepancies, architectural mismatches, and security issues were uncovered:
 
@@ -253,7 +371,7 @@ During our comprehensive audit of both repositories, several significant discrep
 
 ---
 
-## 6. Security, Configuration & Deployment Environment
+## 7. Security, Configuration & Deployment Environment
 
 ### 6.1 Backend Render Configuration (`render.yaml`)
 
@@ -281,7 +399,7 @@ flutter build web --release \
 
 ---
 
-## 7. Actionable Remediation Roadmap
+## 8. Actionable Remediation Roadmap
 
 To ensure long-term stability and security, execute the following phased tasks:
 
