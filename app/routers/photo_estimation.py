@@ -15,6 +15,27 @@ log = logging.getLogger("calorie_backend")
 router = APIRouter(prefix="/estimate-photo", tags=["photo-estimation"])
 
 
+def sniff_image_mime(data: bytes) -> str:
+    """Detect the real image type from its magic bytes.
+
+    Every upload used to be labelled image/jpeg. Camera captures are JPEG, but
+    a web upload or a gallery image can be PNG, WebP or HEIC, and a wrong label
+    risks Gemini misreading or rejecting the image. Falls back to JPEG, the
+    common case.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"heic", b"heix", b"heim", b"heis"):
+            return "image/heic"
+        if brand in (b"mif1", b"msf1", b"heif"):
+            return "image/heif"
+    return "image/jpeg"
+
+
 class PhotoRequest(BaseModel):
     image: str = Field(..., description="Base64 encoded image")
 
@@ -40,7 +61,7 @@ async def estimate_photo(
         raise HTTPException(status_code=413, detail="Image too large")
 
     try:
-        return await identify_foods(image_bytes, mime_type="image/jpeg")
+        return await identify_foods(image_bytes, mime_type=sniff_image_mime(image_bytes))
     except Exception as exc:  # noqa: BLE001
         # Log the detail, return something that doesn't leak upstream keys
         # or internal URLs to the client.

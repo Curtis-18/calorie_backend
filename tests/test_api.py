@@ -286,3 +286,194 @@ def test_health_returns_503_when_db_unreachable(client):
         "database": "unreachable",
         "detail": "ConnectionRefusedError",
     }
+
+
+def _log_payload(log_id: str = "entry-1"):
+    from app.schemas.food_log import FoodLogIn
+
+    return FoodLogIn(
+        id=log_id,
+        name="Apple",
+        calories=95,
+        meal_type="snack",
+        source="manual",
+        timestamp="2026-11-02T08:00:00",
+        log_date="2026-11-02",
+    )
+
+
+class _LogDb:
+    """Fake session for create_log: commit raises `commit_error` if set, and
+    the follow-up lookup returns `stored`."""
+
+    def __init__(self, commit_error=None, stored=None):
+        self.commit_error = commit_error
+        self.stored = stored
+        self.rolled_back = False
+
+    def add(self, _entry):
+        pass
+
+    async def commit(self):
+        if self.commit_error:
+            raise self.commit_error
+
+    async def rollback(self):
+        self.rolled_back = True
+
+    async def refresh(self, _entry):
+        pass
+
+    async def execute(self, _stmt):
+        stored = self.stored
+
+        class _Result:
+            def scalar_one_or_none(self):
+                return stored
+
+        return _Result()
+
+
+def _integrity_error():
+    from sqlalchemy.exc import IntegrityError
+
+    return IntegrityError("INSERT", {}, Exception("duplicate key"))
+
+
+def _post_log(client, db):
+    from app.core.database import get_db
+    from app.main import app
+
+    async def fake_db():
+        yield db
+
+    app.dependency_overrides[get_db] = fake_db
+    return client.post("/logs", json=_log_payload().model_dump(mode="json"))
+
+
+def test_create_log_http_201_on_first_save(client):
+    r = _post_log(client, _LogDb())
+    assert r.status_code == 201
+    assert r.json()["id"] == "entry-1"
+
+
+def test_create_log_http_200_on_retry_of_own_entry(client):
+    # The client accepts 200 or 201, so a retry after a lost response reads
+    # as saved instead of "Failed to save entry".
+    import uuid
+    from datetime import date, datetime
+
+    from app.models.food_log import FoodLog
+
+    # matches the user id the `client` fixture authenticates as
+    owner = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    stored = FoodLog(
+        id="entry-1", user_id=owner, name="Apple", calories=95, protein_g=0,
+        carbs_g=0, fat_g=0, meal_type="snack", source="manual",
+        timestamp=datetime(2026, 11, 2, 8), log_date=date(2026, 11, 2),
+    )
+    r = _post_log(client, _LogDb(commit_error=_integrity_error(), stored=stored))
+    assert r.status_code == 200
+    assert r.json()["id"] == "entry-1"
+
+
+async def test_create_log_retry_of_own_entry_is_idempotent():
+    # A retry after a dropped response must read as saved, not as an error.
+    import uuid
+    from types import SimpleNamespace
+
+    from fastapi import Response
+
+    from app.routers import logs
+
+    owner = uuid.uuid4()
+    stored = SimpleNamespace(id="entry-1", user_id=owner)
+    db = _LogDb(commit_error=_integrity_error(), stored=stored)
+    response = Response()
+
+    result = await logs.create_log(data=_log_payload(), response=response, user_id=owner, db=db)
+
+    assert result is stored
+    assert response.status_code == 200
+    assert db.rolled_back
+
+
+async def test_create_log_id_owned_by_someone_else_is_409():
+    import uuid
+    from types import SimpleNamespace
+
+    import pytest
+    from fastapi import HTTPException, Response
+
+    from app.routers import logs
+
+    stored = SimpleNamespace(id="entry-1", user_id=uuid.uuid4())
+    db = _LogDb(commit_error=_integrity_error(), stored=stored)
+
+    with pytest.raises(HTTPException) as exc:
+        await logs.create_log(data=_log_payload(), response=Response(), user_id=uuid.uuid4(), db=db)
+    assert exc.value.status_code == 409
+
+
+async def test_create_log_non_duplicate_integrity_error_is_500_not_409():
+    # e.g. a foreign key failure: no row with this id exists, so it must not
+    # be reported as "already exists".
+    import uuid
+
+    import pytest
+    from fastapi import HTTPException, Response
+
+    from app.routers import logs
+
+    db = _LogDb(commit_error=_integrity_error(), stored=None)
+
+    with pytest.raises(HTTPException) as exc:
+        await logs.create_log(data=_log_payload(), response=Response(), user_id=uuid.uuid4(), db=db)
+    assert exc.value.status_code == 500
+
+
+async def test_create_log_unexpected_db_error_is_500_not_409():
+    import uuid
+
+    import pytest
+    from fastapi import HTTPException, Response
+
+    from app.routers import logs
+
+    db = _LogDb(commit_error=ConnectionResetError("pooler dropped"))
+
+    with pytest.raises(HTTPException) as exc:
+        await logs.create_log(data=_log_payload(), response=Response(), user_id=uuid.uuid4(), db=db)
+    assert exc.value.status_code == 500
+    assert db.rolled_back
+
+
+def test_sniff_image_mime_detects_common_formats():
+    from app.routers.photo_estimation import sniff_image_mime
+
+    assert sniff_image_mime(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
+    assert sniff_image_mime(b"\x89PNG\r\n\x1a\nrest") == "image/png"
+    assert sniff_image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "image/webp"
+    assert sniff_image_mime(b"\x00\x00\x00\x18ftypheic\x00") == "image/heic"
+    assert sniff_image_mime(b"\x00\x00\x00\x18ftypmif1\x00") == "image/heif"
+    assert sniff_image_mime(b"unknown") == "image/jpeg"
+
+
+def test_estimate_photo_sends_the_real_mime_type(client, monkeypatch):
+    import base64
+
+    from app.routers import photo_estimation
+
+    seen = {}
+
+    async def fake_identify(image_bytes, mime_type):
+        seen["mime"] = mime_type
+        return [{"name": "Rice", "estimated_grams": 150.0}]
+
+    monkeypatch.setattr(photo_estimation, "identify_foods", fake_identify)
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    r = client.post("/estimate-photo", json={"image": base64.b64encode(png).decode()})
+
+    assert r.status_code == 200
+    assert r.json() == [{"name": "Rice", "estimated_grams": 150.0}]
+    assert seen["mime"] == "image/png"

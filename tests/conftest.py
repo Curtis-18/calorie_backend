@@ -20,7 +20,11 @@ def client():
     from app.core.security import get_current_user_id
     from app.main import app
 
-    app.dependency_overrides[get_current_user_id] = lambda: "00000000-0000-0000-0000-000000000001"
+    import uuid
+
+    # A real UUID, as get_current_user_id returns in production. A str here
+    # made ownership checks (entry.user_id == user_id) silently mismatch.
+    app.dependency_overrides[get_current_user_id] = lambda: uuid.UUID("00000000-0000-0000-0000-000000000001")
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
     app.dependency_overrides.clear()
