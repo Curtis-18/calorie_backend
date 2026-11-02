@@ -248,3 +248,41 @@ def test_food_log_rejects_non_positive_calories():
         raise AssertionError("expected validation error")
     except ValidationError:
         pass
+
+
+class _FakeSession:
+    def __init__(self, fail: bool):
+        self.fail = fail
+
+    async def execute(self, *_args, **_kwargs):
+        if self.fail:
+            raise ConnectionRefusedError("db down")
+
+
+def _health_with_db(client, fail: bool):
+    from app.core.database import get_db
+    from app.main import app
+
+    async def fake_db():
+        yield _FakeSession(fail)
+
+    app.dependency_overrides[get_db] = fake_db
+    return client.get("/health")
+
+
+def test_health_reports_ok_when_db_reachable(client):
+    r = _health_with_db(client, fail=False)
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "database": "ok"}
+
+
+def test_health_returns_503_when_db_unreachable(client):
+    # Render only restarts on a non-2xx status. A tuple return used to come
+    # back as `200 [{...}, 503]`, hiding a dead pooler from the health check.
+    r = _health_with_db(client, fail=True)
+    assert r.status_code == 503
+    assert r.json() == {
+        "status": "degraded",
+        "database": "unreachable",
+        "detail": "ConnectionRefusedError",
+    }

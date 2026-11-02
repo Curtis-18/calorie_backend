@@ -6,3 +6,4 @@ venv/
 mlenv/
 *.egg-info/
 .pytest_cache/
+handover.md

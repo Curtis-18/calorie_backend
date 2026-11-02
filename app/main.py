@@ -2,6 +2,7 @@ import logging
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,7 +63,13 @@ async def health(db: AsyncSession = Depends(get_db)):
         await db.execute(text("select 1"))
     except Exception as exc:  # noqa: BLE001 - never leak driver internals to the probe
         log.exception("health check failed")
-        return {"status": "degraded", "database": "unreachable", "detail": type(exc).__name__}, 503
+        # Must be a real JSONResponse. Returning a Flask-style `(body, 503)`
+        # tuple made FastAPI serialise the tuple as a JSON list with a 200, so
+        # Render saw a healthy service and never restarted it on DB loss.
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "database": "unreachable", "detail": type(exc).__name__},
+        )
     return {"status": "ok", "database": "ok"}
 
 
