@@ -477,3 +477,82 @@ def test_estimate_photo_sends_the_real_mime_type(client, monkeypatch):
     assert r.status_code == 200
     assert r.json() == [{"name": "Rice", "estimated_grams": 150.0}]
     assert seen["mime"] == "image/png"
+
+
+def _usda_payload():
+    return {
+        "foods": [
+            {
+                "fdcId": 171688,
+                "description": "Apples, raw, with skin",
+                "dataType": "Foundation",
+                "foodNutrients": [
+                    {"nutrientName": "Energy", "unitName": "KCAL", "value": 52},
+                    {"nutrientName": "Protein", "unitName": "G", "value": 0.26},
+                    {"nutrientName": "Total lipid (fat)", "unitName": "G", "value": 0.17},
+                    {"nutrientName": "Carbohydrate, by difference", "unitName": "G", "value": 13.8},
+                ],
+            },
+            {"fdcId": 2, "description": "", "foodNutrients": []},  # dropped: no description
+        ]
+    }
+
+
+def _mock_usda(monkeypatch, handler):
+    import httpx
+
+    from app.services import usda_service
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(usda_service.httpx, "AsyncClient", fake_client)
+
+
+def test_food_search_returns_mapped_results(client, monkeypatch):
+    # Regression: results used to fail model validation (nutrient keys didn't
+    # match field names), so every non-empty search was a 500.
+    import httpx
+
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json=_usda_payload())
+
+    _mock_usda(monkeypatch, handler)
+    r = client.get("/foods/search", params={"query": "apple", "page_size": 20})
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "query": "apple",
+        "results": [
+            {
+                "fdc_id": 171688,
+                "description": "Apples, raw, with skin",
+                "data_type": "Foundation",
+                "calories_per_100g": 52.0,
+                "protein_g_per_100g": 0.26,
+                "carbs_g_per_100g": 13.8,
+                "fat_g_per_100g": 0.17,
+            }
+        ],
+    }
+    assert seen["params"]["pageSize"] == "20"
+    assert seen["params"]["query"] == "apple"
+
+
+def test_food_search_usda_failure_is_502_not_500(client, monkeypatch):
+    import httpx
+
+    _mock_usda(monkeypatch, lambda request: httpx.Response(503, text="down"))
+    r = client.get("/foods/search", params={"query": "apple"})
+    assert r.status_code == 502
+
+
+def test_food_search_rejects_bad_page_size(client):
+    assert client.get("/foods/search", params={"query": "a", "page_size": 0}).status_code == 422
+    assert client.get("/foods/search", params={"query": "a", "page_size": 51}).status_code == 422

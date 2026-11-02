@@ -44,7 +44,7 @@ def _extract_nutrients(food: dict) -> dict:
     return nutrients
 
 
-async def search_foods(query: str) -> list[FoodSearchResult]:
+async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult]:
     query = query.strip()
     if not query:
         return []
@@ -52,7 +52,7 @@ async def search_foods(query: str) -> list[FoodSearchResult]:
     params = {
         "api_key": settings.usda_api_key,
         "query": query,
-        "pageSize": 10,
+        "pageSize": page_size,
     }
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -71,11 +71,19 @@ async def search_foods(query: str) -> list[FoodSearchResult]:
         description = food.get("description")
         if fdc_id is None or not description:
             continue
+        nutrients = _extract_nutrients(food)
+        # _extract_nutrients keys (calories, protein_g...) differ from the
+        # model's field names. Splatting them in directly failed validation on
+        # every result, so this endpoint 500'd for any non-empty search.
         results.append(
             FoodSearchResult(
                 fdc_id=fdc_id,
                 description=description,
-                **_extract_nutrients(food),
+                data_type=food.get("dataType"),
+                calories_per_100g=nutrients["calories"],
+                protein_g_per_100g=nutrients["protein_g"],
+                carbs_g_per_100g=nutrients["carbs_g"],
+                fat_g_per_100g=nutrients["fat_g"],
             )
         )
 
