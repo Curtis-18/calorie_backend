@@ -20,8 +20,9 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
 {{"narrative": "2-3 sentence summary of how today and this week are going", "tips": ["short actionable tip", "short actionable tip", "short actionable tip"]}}"""
 
 
-async def get_weekly_trend(db: AsyncSession, user_id: str) -> list[dict]:
-    start = date_type.today() - timedelta(days=6)
+async def get_weekly_trend(db: AsyncSession, user_id: str, today: date_type) -> list[dict]:
+    """Per-day totals for the 7 days ending on the user's [today]."""
+    start = today - timedelta(days=6)
     result = await db.execute(
         select(
             FoodLog.log_date,
@@ -51,12 +52,14 @@ async def get_weekly_trend(db: AsyncSession, user_id: str) -> list[dict]:
     return trend
 
 
-async def generate_insights(db: AsyncSession, user_id: str, trend: list[dict]) -> dict:
+async def generate_insights(
+    db: AsyncSession, user_id: str, trend: list[dict], today: date_type
+) -> dict:
     target_result = await db.execute(select(Target).where(Target.user_id == user_id))
     target = target_result.scalar_one_or_none()
 
-    today_str = date_type.today().isoformat()
-    today = next((t for t in trend if t["date"] == today_str), None) or {
+    today_str = today.isoformat()
+    today_totals = next((t for t in trend if t["date"] == today_str), None) or {
         "calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0,
     }
 
@@ -71,10 +74,10 @@ async def generate_insights(db: AsyncSession, user_id: str, trend: list[dict]) -
         protein_target=target.protein_g if target else "not set",
         carbs_target=target.carbs_g if target else "not set",
         fat_target=target.fat_g if target else "not set",
-        today_calories=today["calories"],
-        today_protein=today["protein_g"],
-        today_carbs=today["carbs_g"],
-        today_fat=today["fat_g"],
+        today_calories=today_totals["calories"],
+        today_protein=today_totals["protein_g"],
+        today_carbs=today_totals["carbs_g"],
+        today_fat=today_totals["fat_g"],
         trend_lines=trend_lines,
     )
 

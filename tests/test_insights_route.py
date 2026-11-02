@@ -32,10 +32,10 @@ async def test_insights_survive_a_cache_write_failure(monkeypatch):
     """A failed upsert (e.g. the aware/naive bind error) must not 500 the
     request once the analysis itself succeeded."""
 
-    async def fake_trend(db, user_id):
+    async def fake_trend(db, user_id, today):
         return _trend()
 
-    async def fake_generate(db, user_id, trend):
+    async def fake_generate(db, user_id, trend, today):
         return {"narrative": "hi", "tips": ["a"], "weekly_trend": trend}
 
     monkeypatch.setattr(insights_router, "get_weekly_trend", fake_trend)
@@ -77,7 +77,9 @@ async def test_cached_insights_report_an_explicit_utc_offset(monkeypatch):
     monkeypatch.setattr(insights_router, "generate_insights", boom)
 
     class Cached:
-        date = date_type.today()
+        # The server's "today" is UTC; date.today() is the machine's local date
+        # and differs near midnight away from UTC.
+        date = datetime.now(timezone.utc).date()
         payload = {"narrative": "cached", "tips": [], "weekly_trend": _trend()}
         generated_at = datetime(2026, 10, 11, 10, 24, 5)  # naive, as read back
 
@@ -93,3 +95,87 @@ async def test_cached_insights_report_an_explicit_utc_offset(monkeypatch):
         refresh=False, user_id=uuid.uuid4(), db=FakeDb()
     )
     assert out.generated_at.tzinfo is not None
+
+
+def test_resolve_today_defaults_to_the_utc_date_for_older_clients():
+    from app.routers.insights import resolve_today
+
+    assert resolve_today(None) == datetime.now(timezone.utc).date()
+
+
+def test_resolve_today_accepts_any_real_timezone_and_rejects_the_rest():
+    from datetime import timedelta
+
+    import pytest
+    from fastapi import HTTPException
+
+    from app.routers.insights import resolve_today
+
+    utc_today = datetime.now(timezone.utc).date()
+    for offset in (-1, 0, 1):  # UTC-12 .. UTC+14 is always within a day
+        d = utc_today + timedelta(days=offset)
+        assert resolve_today(d) == d
+    for offset in (-2, 2, 400):
+        with pytest.raises(HTTPException) as exc:
+            resolve_today(utc_today + timedelta(days=offset))
+        assert exc.value.status_code == 422
+
+
+async def test_insights_use_the_device_date_for_trend_prompt_and_cache(monkeypatch):
+    """At 01:00 in Nairobi (UTC+3) the device is already on the next day while
+    the server's UTC date is still the previous one. The week, the "today"
+    numbers and the cache must follow the device."""
+    from datetime import timedelta
+
+    device_today = datetime.now(timezone.utc).date() + timedelta(days=1)
+    seen = {}
+
+    async def fake_trend(db, user_id, today):
+        seen["trend_today"] = today
+        return _trend()
+
+    async def fake_generate(db, user_id, trend, today):
+        seen["generate_today"] = today
+        return {"narrative": "hi", "tips": [], "weekly_trend": trend}
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", fake_trend)
+    monkeypatch.setattr(insights_router, "generate_insights", fake_generate)
+
+    class StaleCache:  # cached under the UTC date: must not count as today's
+        date = device_today - timedelta(days=1)
+        payload = {"narrative": "stale", "tips": [], "weekly_trend": _trend()}
+        generated_at = datetime(2026, 11, 1, 22, 0, 0)
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return StaleCache()
+
+    class FakeDb:
+        def __init__(self):
+            self.upserts = []
+
+        async def execute(self, stmt):
+            if hasattr(stmt, "compile") and "INSERT" in str(stmt).upper():
+                self.upserts.append(stmt.compile().params)
+                return None
+            return _Result()
+
+        async def commit(self):
+            pass
+
+        async def rollback(self):
+            pass
+
+    db = FakeDb()
+    out = await insights_router.get_insights(
+        refresh=False, date=device_today, user_id=uuid.uuid4(), db=db
+    )
+
+    assert out.narrative == "hi"
+    assert seen == {"trend_today": device_today, "generate_today": device_today}
+    assert db.upserts and db.upserts[0]["date"] == device_today
+
+
+def test_insights_rejects_an_implausible_date_over_http(client):
+    r = client.get("/insights", params={"date": "2001-01-01"})
+    assert r.status_code == 422
