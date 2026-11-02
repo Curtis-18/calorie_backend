@@ -9,41 +9,78 @@ from app.models.food import FoodSearchResult
 
 log = logging.getLogger("calorie_backend")
 
-# USDA spells these inconsistently across data types; match the variants that
-# actually show up so a result doesn't silently come back with null macros.
-_NUTRIENT_ALIASES = {
-    "calories": {"Energy"},
-    "protein_g": {"Protein"},
-    "fat_g": {"Total lipid (fat)", "Total lipid (fat) (NLEA)"},
-    "carbs_g": {"Carbohydrate, by difference", "Carbohydrate, by difference (NLEA)"},
+# Where each value can come from, in order of preference. USDA labels these
+# differently across data types, and a value we don't recognise silently
+# becomes None. In particular many Foundation foods (USDA's newest analytical
+# data) report energy only as "Energy (Atwater Specific/General Factors)" with
+# no plain "Energy", so they were dropped from search and photo matching.
+# Specific factors come before General because SR Legacy's "Energy" is
+# itself calculated with specific factors, which keeps sources consistent.
+_NUTRIENT_SOURCES: dict[str, list[tuple[str, str | None]]] = {
+    "calories": [
+        ("Energy", "KCAL"),
+        ("Energy (Atwater Specific Factors)", "KCAL"),
+        ("Energy (Atwater General Factors)", "KCAL"),
+    ],
+    "protein_g": [("Protein", None)],
+    "fat_g": [("Total lipid (fat)", None), ("Total lipid (fat) (NLEA)", None)],
+    "carbs_g": [
+        ("Carbohydrate, by difference", None),
+        ("Carbohydrate, by difference (NLEA)", None),
+        ("Carbohydrate, by summation", None),
+    ],
 }
 
 
-def _extract_nutrients(food: dict) -> dict:
-    nutrients: dict = {key: None for key in _NUTRIENT_ALIASES}
-    seen: set[str] = set()
-
+def _values_by_name(food: dict) -> dict[tuple[str, str], float]:
+    found: dict[tuple[str, str], float] = {}
     for nutrient in food.get("foodNutrients") or []:
         name = nutrient.get("nutrientName")
-        unit = nutrient.get("unitName")
         value = nutrient.get("value")
         if not name or value is None:
             continue
+        found.setdefault((name, (nutrient.get("unitName") or "").upper()), float(value))
+    return found
 
-        if name in _NUTRIENT_ALIASES["calories"] and unit == "KCAL" and "calories" not in seen:
-            nutrients["calories"] = float(value)
-            seen.add("calories")
-            continue
 
-        for key, aliases in _NUTRIENT_ALIASES.items():
-            if key == "calories" or key in seen:
-                continue
-            if name in aliases:
-                nutrients[key] = float(value)
-                seen.add(key)
-                break
+def _pick(found: dict[tuple[str, str], float], sources: list[tuple[str, str | None]]) -> float | None:
+    for name, unit in sources:
+        for (found_name, found_unit), value in found.items():
+            if found_name == name and (unit is None or found_unit == unit):
+                return value
+    return None
 
-    return nutrients
+
+def _extract_nutrients(food: dict) -> dict:
+    found = _values_by_name(food)
+    return {key: _pick(found, sources) for key, sources in _NUTRIENT_SOURCES.items()}
+
+
+def _alcohol_g(food: dict) -> float:
+    return _pick(_values_by_name(food), [("Alcohol, ethyl", None)]) or 0.0
+
+
+def is_plausible(nutrients: dict, alcohol_g: float = 0.0) -> bool:
+    """Whether stated calories roughly agree with the macros (Atwater 4/4/9/7).
+
+    Branded entries are manufacturer-submitted and some are plainly broken
+    (an olive oil at 0 kcal per 100 g). Generous bounds, so fibre, sugar
+    alcohols and specific-vs-general Atwater factors don't trip it.
+    """
+    calories = nutrients.get("calories")
+    if calories is None:
+        return True  # nothing to check; callers already skip these
+    expected = (
+        4 * (nutrients.get("protein_g") or 0)
+        + 4 * (nutrients.get("carbs_g") or 0)
+        + 9 * (nutrients.get("fat_g") or 0)
+        + 7 * alcohol_g
+    )
+    if abs(calories - expected) <= 60:
+        return True
+    if calories <= 0 or expected <= 0:
+        return False
+    return 0.35 <= calories / expected <= 1.6
 
 
 async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult]:
@@ -74,6 +111,9 @@ async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult
         if fdc_id is None or not description:
             continue
         nutrients = _extract_nutrients(food)
+        if food.get("dataType") == "Branded" and not is_plausible(nutrients, _alcohol_g(food)):
+            log.info("skipping implausible branded food %s: %s", fdc_id, nutrients)
+            continue
         # _extract_nutrients keys (calories, protein_g...) differ from the
         # model's field names. Splatting them in directly failed validation on
         # every result, so this endpoint 500'd for any non-empty search.

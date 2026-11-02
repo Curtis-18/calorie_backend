@@ -6,7 +6,9 @@ from pydantic import BaseModel, ConfigDict, Field
 class FoodLogIn(BaseModel):
     id: str
     name: str
-    calories: int = Field(gt=0)
+    # ge, not gt: water, black coffee, tea and diet drinks are 0 kcal and
+    # must be loggable.
+    calories: int = Field(ge=0)
     protein_g: float = Field(ge=0, default=0)
     carbs_g: float = Field(ge=0, default=0)
     fat_g: float = Field(ge=0, default=0)

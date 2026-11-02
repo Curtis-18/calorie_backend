@@ -95,3 +95,79 @@ def test_gemini_non_array_raises_cleanly():
     data = {"candidates": [{"content": {"parts": [{"text": '{"narrative": "hi"}'}]}}]}
     with pytest.raises(RuntimeError, match="non-array"):
         _extract_items(data)
+
+
+# --- shapes captured from live FoodData Central responses (Nov 2026) --------
+
+def _n(name, unit, value):
+    return {"nutrientName": name, "unitName": unit, "value": value}
+
+
+def test_foundation_food_with_only_atwater_energy_gets_calories():
+    """Regression: "Apples, gala, with skin, raw" (Foundation) has no plain
+    "Energy" nutrient, so it came back with calories=None and was dropped."""
+    out = _extract_nutrients({"foodNutrients": [
+        _n("Total lipid (fat)", "G", 0.15),
+        _n("Protein", "G", 0.133),
+        _n("Carbohydrate, by difference", "G", 14.8),
+        _n("Energy (Atwater General Factors)", "KCAL", 61.0),
+        _n("Energy (Atwater Specific Factors)", "KCAL", 54.9),
+    ]})
+    assert out["calories"] == 54.9  # specific factors, consistent with SR Legacy
+    assert out["carbs_g"] == 14.8
+
+
+def test_plain_energy_wins_over_atwater_and_kj_is_ignored():
+    out = _extract_nutrients({"foodNutrients": [
+        _n("Energy", "kJ", 357),
+        _n("Energy (Atwater General Factors)", "KCAL", 90.0),
+        _n("Energy", "KCAL", 85.0),
+    ]})
+    assert out["calories"] == 85.0
+
+
+def test_carbohydrate_by_summation_is_a_fallback():
+    out = _extract_nutrients({"foodNutrients": [_n("Carbohydrate, by summation", "G", 18.0)]})
+    assert out["carbs_g"] == 18.0
+
+
+def test_plausibility_check():
+    from app.services.usda_service import is_plausible
+
+    # Branded "OLIVE OIL" at 0 kcal per 100 g but 93 g fat: broken.
+    assert not is_plausible({"calories": 0.0, "protein_g": 0, "carbs_g": 0, "fat_g": 93.3})
+    # Real olive oil, a label rounding its way to 800-900: fine.
+    assert is_plausible({"calories": 800.0, "protein_g": 0, "carbs_g": 0, "fat_g": 93.3})
+    # Diet soda and water: 0 kcal, no macros: fine.
+    assert is_plausible({"calories": 0.0, "protein_g": 0, "carbs_g": 0, "fat_g": 0})
+    # Whiskey: calories come from alcohol.
+    assert is_plausible({"calories": 250.0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}, alcohol_g=36)
+    # Sugar-free sweets: sugar alcohols count as carbs but carry fewer kcal.
+    assert is_plausible({"calories": 150.0, "protein_g": 0, "carbs_g": 70, "fat_g": 0})
+    # Stated calories wildly above what the macros allow: broken.
+    assert not is_plausible({"calories": 900.0, "protein_g": 5, "carbs_g": 20, "fat_g": 1})
+
+
+async def test_search_skips_broken_branded_rows_but_keeps_lab_data(monkeypatch):
+    import httpx
+
+    from app.services import usda_service
+
+    payload = {"foods": [
+        {"fdcId": 1, "description": "OLIVE OIL", "dataType": "Branded",
+         "foodNutrients": [_n("Energy", "KCAL", 0.0), _n("Total lipid (fat)", "G", 93.3)]},
+        {"fdcId": 2, "description": "Olive oil", "dataType": "Survey (FNDDS)",
+         "foodNutrients": [_n("Energy", "KCAL", 900), _n("Total lipid (fat)", "G", 100)]},
+        {"fdcId": 3, "description": "Apples, gala, with skin, raw", "dataType": "Foundation",
+         "foodNutrients": [_n("Energy (Atwater Specific Factors)", "KCAL", 54.9)]},
+    ]}
+    real = httpx.AsyncClient
+
+    def fake_client(*a, **kw):
+        kw["transport"] = httpx.MockTransport(lambda r: httpx.Response(200, json=payload))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(usda_service.httpx, "AsyncClient", fake_client)
+    results = await usda_service.search_foods("olive oil")
+    assert [r.fdc_id for r in results] == [2, 3]
+    assert results[1].calories_per_100g == 54.9
