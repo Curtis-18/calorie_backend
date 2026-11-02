@@ -25,6 +25,7 @@ MAX_SCORED_PHOTOS_PER_DAY = 3
 XP_FULL_HOUSE = 20  # breakfast, lunch, dinner and a snack in one day
 XP_PROTEIN_GOAL = 20
 XP_PERFECT_DAY = 30
+XP_WEIGH_IN = 10  # per day with a weigh-in
 XP_STREAK_PER_DAY = 2  # x current streak length...
 MAX_STREAK_BONUS = 30  # ...capped
 
@@ -97,7 +98,32 @@ ACHIEVEMENTS = [
     Achievement("on_fire", "On Fire", "Keep a 7-day streak.", goal=7),
     Achievement("inferno", "Inferno", "Keep a 30-day streak.", goal=30),
     Achievement("centurion", "Centurion", "Log 100 meals.", goal=100),
+    Achievement("on_the_scale", "On the Scale", "Record your first weigh-in."),
+    Achievement("check_in_champ", "Check-in Champ", "Weigh in four weeks in a row.", goal=4),
 ]
+
+
+def best_weekly_run(weigh_in_dates: list[date]) -> tuple[int, date | None]:
+    """Longest run of consecutive ISO weeks with a weigh-in, and the day the
+    run first reached 4 weeks (for the badge's unlock date)."""
+    weeks = sorted({d.isocalendar()[:2] for d in weigh_in_dates})
+    first_day_of = {}
+    for d in sorted(weigh_in_dates):
+        first_day_of.setdefault(d.isocalendar()[:2], d)
+    best = run = 0
+    reached_four: date | None = None
+    previous = None
+    for week in weeks:
+        monday = date.fromisocalendar(week[0], week[1], 1)
+        if previous is not None and (monday - previous).days == 7:
+            run += 1
+        else:
+            run = 1
+        previous = monday
+        best = max(best, run)
+        if run >= 4 and reached_four is None:
+            reached_four = first_day_of[week]
+    return best, reached_four
 
 
 def group_by_day(rows: list[LogRow]) -> dict[date, DayStats]:
@@ -148,6 +174,7 @@ def compute_progress(
     today: date,
     calorie_target: int | None,
     protein_target: int | None,
+    weigh_in_dates: list[date] | None = None,
 ) -> dict:
     """Score a user's whole history up to and including [today].
 
@@ -207,6 +234,14 @@ def compute_progress(
                     streak = 0
             day += timedelta(days=1)
 
+    weigh_ins = sorted({d for d in (weigh_in_dates or []) if d <= today})
+    xp += XP_WEIGH_IN * len(weigh_ins)
+    if weigh_ins:
+        unlock("on_the_scale", weigh_ins[0])
+    weekly_run, reached_four = best_weekly_run(weigh_ins)
+    if reached_four:
+        unlock("check_in_champ", reached_four)
+
     today_stats = days.get(today, DayStats())
     level = level_for(xp)
     progress_values = {
@@ -219,6 +254,8 @@ def compute_progress(
         "on_fire": best_streak,
         "inferno": best_streak,
         "centurion": total_meals,
+        "on_the_scale": 1 if weigh_ins else 0,
+        "check_in_champ": weekly_run,
     }
 
     return {
@@ -239,7 +276,8 @@ def compute_progress(
             "next_level_xp": xp_for_level(level + 1),
         },
         "today": {
-            "xp": day_xp(today_stats, streak, calorie_target, protein_target) if today_stats.entries else 0,
+            "xp": (day_xp(today_stats, streak, calorie_target, protein_target) if today_stats.entries else 0)
+            + (XP_WEIGH_IN if today in weigh_ins else 0),
             "perfect_day": is_perfect(today_stats, calorie_target),
             "calories": today_stats.calories,
             "target_low": round(PERFECT_LOW * calorie_target) if calorie_target else None,

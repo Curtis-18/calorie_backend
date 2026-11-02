@@ -9,11 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, settings
 from app.core.database import get_db
 from app.core.security import get_current_user_id
-from app.routers import foods, insights, logs, photo_estimation, progress, targets
+from app.routers import foods, insights, logs, photo_estimation, progress, targets, weights
 
 # Import every model before the app serves traffic so Base.metadata knows
 # about all tables and FK targets resolve.
-from app.models import food_log, insights_cache, target, user  # noqa: F401
+from app.models import food_log, insights_cache, target, user, weight_log  # noqa: F401
 
 log = logging.getLogger("calorie_backend")
 
@@ -50,6 +50,7 @@ app.include_router(targets.router)
 app.include_router(insights.router)
 app.include_router(photo_estimation.router)
 app.include_router(progress.router)
+app.include_router(weights.router)
 
 
 @app.get("/")

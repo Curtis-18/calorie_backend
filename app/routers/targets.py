@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import date as date_type
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -7,8 +8,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.dates import resolve_today
 from app.core.security import get_current_user_id
 from app.models.target import Target
+from app.models.weight_log import WeightLog
 from app.schemas.target import OnboardingIn, TargetOut
 from app.services.target_calculator import (
     UnderageError,
@@ -24,6 +27,7 @@ router = APIRouter(prefix="/targets", tags=["targets"])
 @router.post("", response_model=TargetOut)
 async def upsert_target(
     data: OnboardingIn,
+    date: date_type | None = None,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
@@ -69,6 +73,24 @@ async def upsert_target(
     )
     
     await db.execute(stmt)
+    # The profile weight is also a weigh-in: it's the first point on the
+    # progress chart, and editing the profile later records a new one. In a
+    # savepoint, so a missing weight_logs table (migration not yet run) can
+    # never break onboarding itself.
+    try:
+        async with db.begin_nested():
+            await db.execute(
+                pg_insert(WeightLog)
+                .values(
+                    id=uuid.uuid4(), user_id=user_id,
+                    log_date=resolve_today(date), weight_kg=computed["weight_kg"],
+                )
+                .on_conflict_do_update(
+                    constraint="weight_logs_user_day", set_={"weight_kg": computed["weight_kg"]}
+                )
+            )
+    except Exception:  # noqa: BLE001 - the weigh-in is a bonus, not the save
+        log.exception("could not record the onboarding weigh-in")
     await db.commit()
 
     return {

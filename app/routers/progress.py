@@ -10,6 +10,7 @@ from app.core.dates import resolve_today
 from app.core.security import get_current_user_id
 from app.models.food_log import FoodLog
 from app.models.target import Target
+from app.models.weight_log import WeightLog
 from app.schemas.progress import ProgressOut
 from app.services.progress_service import LogRow, compute_progress
 
@@ -46,9 +47,25 @@ async def get_progress(
     )
     target = target_result.first()
 
+    weigh_in_dates: list[date_type] = []
+    try:
+        async with db.begin_nested():  # weight_logs may not exist before the migration
+            weigh_in_dates = list(
+                (
+                    await db.execute(
+                        select(WeightLog.log_date).where(
+                            WeightLog.user_id == user_id, WeightLog.log_date <= today
+                        )
+                    )
+                ).scalars()
+            )
+    except Exception:  # noqa: BLE001 - progress without weigh-ins beats an error
+        weigh_in_dates = []
+
     return compute_progress(
         rows,
         today=today,
         calorie_target=target[0] if target else None,
         protein_target=target[1] if target else None,
+        weigh_in_dates=weigh_in_dates,
     )
