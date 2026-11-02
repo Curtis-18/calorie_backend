@@ -1,4 +1,6 @@
+import logging
 import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -8,7 +10,14 @@ from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.models.target import Target
 from app.schemas.target import OnboardingIn, TargetOut
-from app.services.target_calculator import calculate_targets
+from app.services.target_calculator import (
+    UnderageError,
+    UnderweightLossError,
+    calculate_targets,
+    compute_targets,
+)
+
+log = logging.getLogger("calorie_backend")
 
 router = APIRouter(prefix="/targets", tags=["targets"])
 
@@ -21,7 +30,21 @@ async def upsert_target(
     """
     Calculates and saves (or updates) the user's nutritional targets.
     """
-    computed = calculate_targets(data)
+    try:
+        computed = calculate_targets(data)
+    except UnderageError:
+        raise HTTPException(
+            status_code=422,
+            detail="You need to be 18 or older to get calorie targets.",
+        )
+    except UnderweightLossError:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Your weight is already below the healthy range for your height, so we "
+                "can't set a weight-loss target. Try \"Maintain\" or \"Gain\" instead."
+            ),
+        )
 
     values = {
         "user_id": user_id,
@@ -74,9 +97,40 @@ async def get_target(
     if target is None:
         raise HTTPException(status_code=404, detail="No target set yet")
 
-    # Calculate BMI on the fly for the dashboard
+    # Recompute from the stored answers so formula fixes reach existing users
+    # on their next login, without them re-entering their profile. Persist
+    # only when something actually changed.
+    try:
+        fresh = compute_targets(
+            date_of_birth=target.date_of_birth,
+            sex=target.sex,
+            height_cm=target.height_cm,
+            weight_kg=target.weight_kg,
+            activity_level=target.activity_level,
+            goal=target.goal,
+        )
+    except (UnderageError, UnderweightLossError):
+        fresh = None  # an existing row the new rules refuse: leave it as it was
+    except Exception:  # noqa: BLE001 - never fail a read over a recompute
+        log.exception("target recompute failed; serving stored values")
+        fresh = None
+
+    if fresh is not None:
+        changed = {
+            k: fresh[k]
+            for k in ("bmr", "tdee", "calorie_target", "protein_g", "fat_g", "carbs_g")
+            if fresh[k] != getattr(target, k)
+        }
+        if changed:
+            for k, v in changed.items():
+                setattr(target, k, v)
+            try:
+                await db.commit()
+            except Exception:  # noqa: BLE001 - serve the fresh numbers anyway
+                await db.rollback()
+                log.exception("failed to persist recomputed targets")
+
     bmi = target.weight_kg / ((target.height_cm / 100) ** 2)
-    
     return {
         "date_of_birth": target.date_of_birth,
         "sex": target.sex,
@@ -84,11 +138,11 @@ async def get_target(
         "goal": target.goal,
         "height_cm": target.height_cm,
         "weight_kg": target.weight_kg,
-        "bmr": target.bmr,
-        "tdee": target.tdee,
-        "calorie_target": target.calorie_target,
+        "bmr": fresh["bmr"] if fresh else target.bmr,
+        "tdee": fresh["tdee"] if fresh else target.tdee,
+        "calorie_target": fresh["calorie_target"] if fresh else target.calorie_target,
         "bmi": round(bmi, 1),
-        "protein_g": target.protein_g,
-        "fat_g": target.fat_g,
-        "carbs_g": target.carbs_g,
+        "protein_g": fresh["protein_g"] if fresh else target.protein_g,
+        "fat_g": fresh["fat_g"] if fresh else target.fat_g,
+        "carbs_g": fresh["carbs_g"] if fresh else target.carbs_g,
     }

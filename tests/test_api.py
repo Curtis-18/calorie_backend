@@ -231,24 +231,18 @@ def test_food_log_rejects_bad_meal_type():
         pass
 
 
-def test_food_log_rejects_non_positive_calories():
+def test_food_log_accepts_zero_calories_but_not_negative():
+    """Water, black coffee, tea and diet drinks are 0 kcal and must be loggable."""
+    import pytest
     from pydantic import ValidationError
 
     from app.schemas.food_log import FoodLogIn
 
-    try:
-        FoodLogIn(
-            id="1",
-            name="x",
-            calories=0,
-            meal_type="snack",
-            source="manual",
-            timestamp="2026-09-29T18:00:00",
-            log_date="2026-09-29",
-        )
-        raise AssertionError("expected validation error")
-    except ValidationError:
-        pass
+    base = dict(id="1", name="Water", meal_type="snack", source="manual",
+                timestamp="2026-09-29T18:00:00", log_date="2026-09-29")
+    assert FoodLogIn(calories=0, **base).calories == 0
+    with pytest.raises(ValidationError):
+        FoodLogIn(calories=-5, **base)
 
 
 class _FakeSession:
@@ -598,11 +592,15 @@ def test_get_targets_returns_onboarding_answers_for_profile_restore(client):
     from datetime import date
     from types import SimpleNamespace
 
-    _with_db(_TargetDb(SimpleNamespace(
+    from app.services.target_calculator import compute_targets
+
+    row = SimpleNamespace(
         date_of_birth=date(1995, 3, 14), sex="female", activity_level="very_active",
         goal="lose", height_cm=165.1, weight_kg=60.0, bmr=1350.0, tdee=2565.0,
         calorie_target=2065, protein_g=120, fat_g=57, carbs_g=266,
-    )))
+    )
+    db = _TargetDb(row)
+    _with_db(db)
     r = client.get("/targets")
 
     assert r.status_code == 200
@@ -611,8 +609,18 @@ def test_get_targets_returns_onboarding_answers_for_profile_restore(client):
     assert body["sex"] == "female"
     assert body["activity_level"] == "very_active"
     assert body["goal"] == "lose"
-    assert body["calorie_target"] == 2065
     assert body["bmi"] == round(60.0 / 1.651 ** 2, 1)
+
+    # Stored numbers from the old formula are recomputed and saved, so formula
+    # fixes reach existing users on their next login.
+    fresh = compute_targets(
+        date_of_birth=date(1995, 3, 14), sex="female", height_cm=165.1,
+        weight_kg=60.0, activity_level="very_active", goal="lose",
+    )
+    assert body["calorie_target"] == fresh["calorie_target"]
+    assert body["protein_g"] == fresh["protein_g"]
+    assert row.calorie_target == fresh["calorie_target"]
+    assert db.committed
 
 
 def test_get_targets_404_when_not_onboarded(client):
@@ -720,3 +728,17 @@ def test_estimate_photo_returns_enriched_foods(client, monkeypatch):
         "calories_per_100g": 130.0, "protein_g_per_100g": 1.0,
         "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0,
     }]
+
+
+def test_post_targets_rejects_under_18(client):
+    from datetime import date
+
+    _with_db(_TargetDb())
+    dob = date.today().replace(year=date.today().year - 15)
+    r = client.post("/targets", json={
+        "date_of_birth": dob.isoformat(), "sex": "female", "height_feet": 5,
+        "height_inches": 2, "weight_value": 50, "weight_unit": "kg",
+        "activity_level": "sedentary", "goal": "lose",
+    })
+    assert r.status_code == 422
+    assert "18" in r.json()["detail"]
