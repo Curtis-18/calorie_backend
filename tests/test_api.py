@@ -97,7 +97,6 @@ def test_every_data_route_requires_auth(anon_client):
         ("delete", "/logs/some-id"),
         ("post", "/logs"),
         ("post", "/estimate-photo"),
-        ("post", "/logs/analyze-photo"),
     ]:
         fn = getattr(client, method)
         r = fn(path, json={}) if method == "post" else fn(path)
@@ -125,20 +124,22 @@ def test_estimate_photo_requires_the_field(client):
     assert client.post("/estimate-photo", json={}).status_code == 422
 
 
-def test_analyze_photo_upstream_failure_returns_502(client, monkeypatch):
+def test_estimate_photo_upstream_failure_returns_502(client, monkeypatch):
     """A Gemini outage must be a clean 502, not an unhandled 500 that the
     browser reports as 'Failed to fetch' because it lacks CORS headers."""
-    from app.routers import logs
+    from app.routers import photo_estimation
 
     async def boom(*args, **kwargs):
         raise RuntimeError("gemini down")
 
-    monkeypatch.setattr(logs, "identify_foods", boom)
-    r = client.post(
-        "/logs/analyze-photo",
-        files={"photo": ("meal.jpg", b"fake-bytes", "image/jpeg")},
-    )
+    monkeypatch.setattr(photo_estimation, "identify_foods", boom)
+    r = client.post("/estimate-photo", json={"image": base64.b64encode(b"\xff\xd8\xffjpeg").decode()})
     assert r.status_code == 502
+
+
+def test_removed_multipart_photo_endpoint_is_gone(client):
+    # Superseded by /estimate-photo, which now does the USDA enrichment too.
+    assert client.post("/logs/analyze-photo", json={}).status_code in (404, 405)
 
 
 def test_food_search_empty_query_returns_empty_list(client):
@@ -470,12 +471,16 @@ def test_estimate_photo_sends_the_real_mime_type(client, monkeypatch):
         seen["mime"] = mime_type
         return [{"name": "Rice", "estimated_grams": 150.0}]
 
+    async def no_enrichment(items):
+        return items
+
     monkeypatch.setattr(photo_estimation, "identify_foods", fake_identify)
+    monkeypatch.setattr(photo_estimation, "enrich_detected_foods", no_enrichment)
     png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
     r = client.post("/estimate-photo", json={"image": base64.b64encode(png).decode()})
 
     assert r.status_code == 200
-    assert r.json() == [{"name": "Rice", "estimated_grams": 150.0}]
+    assert r.json()[0]["name"] == "Rice"
     assert seen["mime"] == "image/png"
 
 
@@ -556,3 +561,162 @@ def test_food_search_usda_failure_is_502_not_500(client, monkeypatch):
 def test_food_search_rejects_bad_page_size(client):
     assert client.get("/foods/search", params={"query": "a", "page_size": 0}).status_code == 422
     assert client.get("/foods/search", params={"query": "a", "page_size": 51}).status_code == 422
+
+
+class _TargetDb:
+    """Fake session: `execute` returns `row` for the select, records writes."""
+
+    def __init__(self, row=None):
+        self.row = row
+        self.committed = False
+
+    async def execute(self, _stmt):
+        row = self.row
+
+        class _Result:
+            def scalar_one_or_none(self):
+                return row
+
+        return _Result()
+
+    async def commit(self):
+        self.committed = True
+
+
+def _with_db(db):
+    from app.core.database import get_db
+    from app.main import app
+
+    async def fake_db():
+        yield db
+
+    app.dependency_overrides[get_db] = fake_db
+
+
+def test_get_targets_returns_onboarding_answers_for_profile_restore(client):
+    # A fresh install has no cache: it rebuilds the profile from this response.
+    from datetime import date
+    from types import SimpleNamespace
+
+    _with_db(_TargetDb(SimpleNamespace(
+        date_of_birth=date(1995, 3, 14), sex="female", activity_level="very_active",
+        goal="lose", height_cm=165.1, weight_kg=60.0, bmr=1350.0, tdee=2565.0,
+        calorie_target=2065, protein_g=120, fat_g=57, carbs_g=266,
+    )))
+    r = client.get("/targets")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["date_of_birth"] == "1995-03-14"
+    assert body["sex"] == "female"
+    assert body["activity_level"] == "very_active"
+    assert body["goal"] == "lose"
+    assert body["calorie_target"] == 2065
+    assert body["bmi"] == round(60.0 / 1.651 ** 2, 1)
+
+
+def test_get_targets_404_when_not_onboarded(client):
+    _with_db(_TargetDb(None))
+    assert client.get("/targets").status_code == 404
+
+
+def test_post_targets_echoes_onboarding_answers(client):
+    db = _TargetDb()
+    _with_db(db)
+    r = client.post("/targets", json={
+        "date_of_birth": "1995-03-14", "sex": "male", "height_feet": 5,
+        "height_inches": 10, "weight_value": 75, "weight_unit": "kg",
+        "activity_level": "moderate", "goal": "gain",
+    })
+
+    assert r.status_code == 200
+    body = r.json()
+    assert db.committed
+    assert (body["date_of_birth"], body["sex"], body["activity_level"], body["goal"]) == (
+        "1995-03-14", "male", "moderate", "gain",
+    )
+    assert body["calorie_target"] > 0
+
+
+def _result(fdc_id, description, data_type, kcal=100.0):
+    from app.models.food import FoodSearchResult
+
+    return FoodSearchResult(
+        fdc_id=fdc_id, description=description, data_type=data_type,
+        calories_per_100g=kcal, protein_g_per_100g=1.0,
+        carbs_g_per_100g=2.0, fat_g_per_100g=3.0,
+    )
+
+
+def test_rank_best_match_prefers_generic_foods_and_plain_names():
+    from app.services.usda_service import rank_best_match
+
+    results = [
+        _result(1, "Rice flour, white", "SR Legacy"),       # penalised word
+        _result(2, "Rice, white, cooked, BRAND X", "Branded"),
+        _result(3, "Rice, white, cooked", "Foundation"),
+        _result(4, "Rice cakes", "Foundation", kcal=None),  # no calories
+    ]
+    assert rank_best_match(results, "rice white cooked").fdc_id == 3
+    assert rank_best_match(results, "apple juice") is not None  # still picks something
+    assert rank_best_match([_result(9, "x", "Foundation", kcal=None)], "x") is None
+    assert rank_best_match([], "x") is None
+
+
+def test_rank_best_match_penalises_a_different_product():
+    from app.services.usda_service import rank_best_match
+
+    results = [
+        _result(1, "Apple juice, canned", "Foundation"),
+        _result(2, "Apples, raw, with skin", "Survey (FNDDS)"),
+    ]
+    assert rank_best_match(results, "apple").fdc_id == 2
+
+
+async def test_enrich_detected_foods_fills_macros_and_survives_a_failed_lookup(monkeypatch):
+    from app.services import usda_service
+
+    async def fake_search(query, page_size=10):
+        if query == "mystery":
+            raise RuntimeError("usda down")
+        if query == "nothing":
+            return []
+        return [_result(7, "Rice, white, cooked", "Foundation", kcal=130.0)]
+
+    monkeypatch.setattr(usda_service, "search_foods", fake_search)
+    out = await usda_service.enrich_detected_foods([
+        {"name": "rice", "estimated_grams": 150.0},
+        {"name": "mystery", "estimated_grams": 50.0},
+        {"name": "nothing", "estimated_grams": 20.0},
+    ])
+
+    assert out[0] == {
+        "name": "rice", "estimated_grams": 150.0, "matched": True,
+        "calories_per_100g": 130.0, "protein_g_per_100g": 1.0,
+        "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0,
+    }
+    assert out[1]["matched"] is False and out[1]["calories_per_100g"] is None
+    assert out[2]["matched"] is False
+    assert [o["name"] for o in out] == ["rice", "mystery", "nothing"]  # order kept
+
+
+def test_estimate_photo_returns_enriched_foods(client, monkeypatch):
+    from app.routers import photo_estimation
+    from app.services import usda_service
+
+    async def fake_identify(image_bytes, mime_type):
+        return [{"name": "rice", "estimated_grams": 150.0}]
+
+    async def fake_search(query, page_size=10):
+        return [_result(7, "Rice, white, cooked", "Foundation", kcal=130.0)]
+
+    monkeypatch.setattr(photo_estimation, "identify_foods", fake_identify)
+    monkeypatch.setattr(usda_service, "search_foods", fake_search)
+    r = client.post("/estimate-photo", json={"image": base64.b64encode(b"\xff\xd8\xffjpeg").decode()})
+
+    assert r.status_code == 200
+    assert r.json() == [{
+        "name": "rice", "estimated_grams": 150.0, "matched": True,
+        "calories_per_100g": 130.0, "protein_g_per_100g": 1.0,
+        "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0,
+    }]

@@ -1,16 +1,17 @@
 from pydantic import BaseModel
 
-class DetectedFoodItem(BaseModel):
-    name:str
-    estimated_grams:float
-    calories_per_100g: float | None
-    estimated_calories: float | None
-    protein_g_per_100g: float | None
-    estimated_protein_g: float | None
-    carbs_g_per_100g: float | None
-    estimated_carbs_g: float | None
-    fat_g_per_100g: float | None
-    estimated_fat_g: float | None
 
-class PhotoAnalysisResponse(BaseModel):
-    items: list[DetectedFoodItem]
+class EstimatedFood(BaseModel):
+    """One food Gemini spotted in a photo, with USDA macros when matched.
+
+    `name` and `estimated_grams` are what older clients read; the rest lets
+    the client skip one USDA lookup per food.
+    """
+
+    name: str
+    estimated_grams: float
+    matched: bool = False
+    calories_per_100g: float | None = None
+    protein_g_per_100g: float | None = None
+    carbs_g_per_100g: float | None = None
+    fat_g_per_100g: float | None = None

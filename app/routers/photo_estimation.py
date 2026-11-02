@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.core.security import get_current_user_id
+from app.models.photo import EstimatedFood
 from app.services.gemini_service import identify_foods
+from app.services.usda_service import enrich_detected_foods
 
 log = logging.getLogger("calorie_backend")
 
@@ -40,7 +42,7 @@ class PhotoRequest(BaseModel):
     image: str = Field(..., description="Base64 encoded image")
 
 
-@router.post("")
+@router.post("", response_model=list[EstimatedFood])
 async def estimate_photo(
     request: PhotoRequest,
     user_id: uuid.UUID = Depends(get_current_user_id),
@@ -61,9 +63,13 @@ async def estimate_photo(
         raise HTTPException(status_code=413, detail="Image too large")
 
     try:
-        return await identify_foods(image_bytes, mime_type=sniff_image_mime(image_bytes))
+        detected = await identify_foods(image_bytes, mime_type=sniff_image_mime(image_bytes))
     except Exception as exc:  # noqa: BLE001
         # Log the detail, return something that doesn't leak upstream keys
         # or internal URLs to the client.
         log.exception("photo estimation failed")
         raise HTTPException(status_code=502, detail="Photo analysis service unavailable")
+
+    # Macros are filled in here, in parallel, instead of the client making one
+    # /foods/search round-trip per detected food over a mobile connection.
+    return await enrich_detected_foods(detected)

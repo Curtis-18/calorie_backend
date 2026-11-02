@@ -15,6 +15,14 @@ class OnboardingIn(BaseModel):
 
 
 class TargetOut(BaseModel):
+    # The onboarding answers, so a fresh install or new browser can rebuild the
+    # whole profile from the server. Previously only the computed numbers came
+    # back and the client had nothing to restore from but its own cache.
+    date_of_birth: date | None = None
+    sex: Literal["male", "female"] | None = None
+    activity_level: Literal["sedentary", "light", "moderate", "active", "very_active"] | None = None
+    goal: Literal["lose", "maintain", "gain"] | None = None
+
     height_cm: float
     weight_kg: float
     bmr: float

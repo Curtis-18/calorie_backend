@@ -78,5 +78,5 @@ python create_tables.py
 
 - `/foods/search` requires auth. It proxies a metered USDA key, so leaving
   it open would let anyone burn the quota.
-- `python-multipart` is required by the `UploadFile` endpoint
-  `POST /logs/analyze-photo`.
+- `POST /estimate-photo` takes a base64 JSON image, asks Gemini for foods and
+  gram estimates, and fills in USDA macros server-side in one round-trip.

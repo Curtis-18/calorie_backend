@@ -48,7 +48,13 @@ async def upsert_target(
     await db.execute(stmt)
     await db.commit()
 
-    return computed
+    return {
+        **computed,
+        "date_of_birth": data.date_of_birth,
+        "sex": data.sex,
+        "activity_level": data.activity_level,
+        "goal": data.goal,
+    }
 
 @router.get("", response_model=TargetOut)
 async def get_target(
@@ -72,6 +78,10 @@ async def get_target(
     bmi = target.weight_kg / ((target.height_cm / 100) ** 2)
     
     return {
+        "date_of_birth": target.date_of_birth,
+        "sex": target.sex,
+        "activity_level": target.activity_level,
+        "goal": target.goal,
         "height_cm": target.height_cm,
         "weight_kg": target.weight_kg,
         "bmr": target.bmr,
