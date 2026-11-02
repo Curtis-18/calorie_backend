@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, settings
 from app.core.database import get_db
 from app.core.security import get_current_user_id
-from app.routers import foods, insights, logs, photo_estimation, targets
+from app.routers import foods, insights, logs, photo_estimation, progress, targets
 
 # Import every model before the app serves traffic so Base.metadata knows
 # about all tables and FK targets resolve.
@@ -49,6 +49,7 @@ app.include_router(logs.router)
 app.include_router(targets.router)
 app.include_router(insights.router)
 app.include_router(photo_estimation.router)
+app.include_router(progress.router)
 
 
 @app.get("/")
