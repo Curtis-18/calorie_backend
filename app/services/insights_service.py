@@ -16,6 +16,11 @@ Today so far: {today_calories} kcal, {today_protein}g protein, {today_carbs}g ca
 Last 7 days (date: calories/protein/carbs/fat):
 {trend_lines}
 
+Rules for any numbers you mention:
+- Copy them exactly as given above. Never add, subtract, average or round them yourself, and never invent a figure.
+- "Today so far" is the only figure for today; the app shows the same number on the home screen, so it must match.
+- If today so far is 0 kcal, say nothing has been logged yet today.
+
 Respond with ONLY a JSON object, no other text, in this exact shape:
 {{"narrative": "2-3 sentence summary of how today and this week are going", "tips": ["short actionable tip", "short actionable tip", "short actionable tip"]}}"""
 

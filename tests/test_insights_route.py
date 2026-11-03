@@ -76,6 +76,11 @@ async def test_cached_insights_report_an_explicit_utc_offset(monkeypatch):
 
     monkeypatch.setattr(insights_router, "generate_insights", boom)
 
+    async def same_trend(db, user_id, today):
+        return _trend()
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", same_trend)
+
     class Cached:
         # The server's "today" is UTC; date.today() is the machine's local date
         # and differs near midnight away from UTC.
@@ -95,6 +100,46 @@ async def test_cached_insights_report_an_explicit_utc_offset(monkeypatch):
         refresh=False, user_id=uuid.uuid4(), db=FakeDb()
     )
     assert out.generated_at.tzinfo is not None
+
+
+async def test_a_meal_logged_after_the_first_visit_regenerates_the_narrative(monkeypatch):
+    """The cached narrative said "no meals today" all day, even after logging."""
+    fresh = _trend()
+    fresh[-1] = {**fresh[-1], "calories": fresh[-1]["calories"] + 450}
+    generated = []
+
+    async def new_trend(db, user_id, today):
+        return fresh
+
+    async def new_insights(db, user_id, trend, today):
+        generated.append(trend)
+        return {"narrative": "you logged a meal", "tips": [], "weekly_trend": trend}
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", new_trend)
+    monkeypatch.setattr(insights_router, "generate_insights", new_insights)
+
+    class Cached:
+        date = datetime.now(timezone.utc).date()
+        payload = {"narrative": "no meals yet", "tips": [], "weekly_trend": _trend()}
+        generated_at = datetime(2026, 10, 11, 10, 24, 5)
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return Cached()
+
+    class FakeDb:
+        async def execute(self, stmt):
+            return _Result()
+
+        async def commit(self):
+            pass
+
+        async def rollback(self):
+            pass
+
+    out = await insights_router.get_insights(refresh=False, user_id=uuid.uuid4(), db=FakeDb())
+    assert generated == [fresh]
+    assert out.narrative == "you logged a meal"
 
 
 def test_resolve_today_defaults_to_the_utc_date_for_older_clients():

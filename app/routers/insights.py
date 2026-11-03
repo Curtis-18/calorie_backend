@@ -52,12 +52,22 @@ async def get_insights(
         select(InsightsCache).where(InsightsCache.user_id == user_id)
     )
     cached = result.scalar_one_or_none()
-    if not refresh and cached and cached.date == today:
+    # The trend is our own data and cheap, so it is always computed fresh. The
+    # cached narrative is only reused while the logs behind it are unchanged:
+    # it used to be served all day, so a meal logged after the first visit
+    # still showed "you haven't logged any meals today".
+    trend = await get_weekly_trend(db, user_id, today)
+    if (
+        not refresh
+        and cached
+        and cached.date == today
+        and cached.payload
+        and cached.payload.get("weekly_trend") == trend
+    ):
         return InsightsOut(
             **cached.payload, generated_at=_as_utc(cached.generated_at)
         )
 
-    trend = await get_weekly_trend(db, user_id, today)
     try:
         payload = await generate_insights(db, user_id, trend, today)
     except Exception:  # noqa: BLE001 - the trend is still worth serving
