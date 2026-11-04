@@ -11,11 +11,11 @@ from app.core.config import Settings, settings
 from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.models.user import Profile
-from app.routers import foods, insights, logs, photo_estimation, progress, targets, username, weights
+from app.routers import foods, friends, insights, logs, photo_estimation, progress, targets, username, weights
 
 # Import every model before the app serves traffic so Base.metadata knows
 # about all tables and FK targets resolve.
-from app.models import food_log, insights_cache, target, user, weight_log  # noqa: F401
+from app.models import food_log, friendship, insights_cache, target, user, weight_log  # noqa: F401
 
 log = logging.getLogger("calorie_backend")
 
@@ -54,6 +54,7 @@ app.include_router(photo_estimation.router)
 app.include_router(progress.router)
 app.include_router(weights.router)
 app.include_router(username.router)
+app.include_router(friends.router)
 
 
 @app.get("/")
