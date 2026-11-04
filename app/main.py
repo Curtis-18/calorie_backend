@@ -1,15 +1,17 @@
 import logging
+import uuid
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, settings
 from app.core.database import get_db
 from app.core.security import get_current_user_id
-from app.routers import foods, insights, logs, photo_estimation, progress, targets, weights
+from app.models.user import Profile
+from app.routers import foods, insights, logs, photo_estimation, progress, targets, username, weights
 
 # Import every model before the app serves traffic so Base.metadata knows
 # about all tables and FK targets resolve.
@@ -51,6 +53,7 @@ app.include_router(insights.router)
 app.include_router(photo_estimation.router)
 app.include_router(progress.router)
 app.include_router(weights.router)
+app.include_router(username.router)
 
 
 @app.get("/")
@@ -76,5 +79,17 @@ async def health(db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/me")
-async def me(user_id: str = Depends(get_current_user_id)):
-    return {"user_id": str(user_id)}
+async def me(
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Who am I. `username` is None until the user picks one (every existing
+    user, right after this ships), which is how the app knows to ask."""
+    username = None
+    try:
+        username = (
+            await db.execute(select(Profile.username).where(Profile.id == user_id))
+        ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001 - the column may not exist until the migration is run
+        log.exception("could not read username")
+    return {"user_id": str(user_id), "username": username}
