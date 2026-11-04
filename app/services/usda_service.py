@@ -187,6 +187,8 @@ async def enrich_detected_foods(items: list[dict]) -> list[dict]:
         return {
             **item,
             "matched": match is not None,
+            "matched_description": match.description if match else None,
+            "matched_fdc_id": match.fdc_id if match else None,
             "calories_per_100g": match.calories_per_100g if match else None,
             "protein_g_per_100g": match.protein_g_per_100g if match else None,
             "carbs_g_per_100g": match.carbs_g_per_100g if match else None,

@@ -700,6 +700,7 @@ async def test_enrich_detected_foods_fills_macros_and_survives_a_failed_lookup(m
 
     assert out[0] == {
         "name": "rice", "estimated_grams": 150.0, "matched": True,
+        "matched_description": "Rice, white, cooked", "matched_fdc_id": 7,
         "calories_per_100g": 130.0, "protein_g_per_100g": 1.0,
         "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0,
     }
@@ -725,6 +726,7 @@ def test_estimate_photo_returns_enriched_foods(client, monkeypatch):
     assert r.status_code == 200
     assert r.json() == [{
         "name": "rice", "estimated_grams": 150.0, "matched": True,
+        "matched_description": "Rice, white, cooked", "matched_fdc_id": 7,
         "calories_per_100g": 130.0, "protein_g_per_100g": 1.0,
         "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0,
     }]
