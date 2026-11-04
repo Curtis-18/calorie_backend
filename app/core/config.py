@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     # each one with a 400 "Disallowed CORS origin".
     cors_origins: str = "http://localhost:3000,http://localhost:8080,https://calorie-app-*.vercel.app"
 
+    # Needed to store and sign snap photos (Supabase > Project Settings > API >
+    # service_role). Optional so the rest of the app runs without it; snap
+    # endpoints answer 503 until it is set. Never ship this key to a client.
+    supabase_service_role_key: str | None = None
+    snaps_bucket: str = "snaps"
+    max_snap_bytes: int = 2 * 1024 * 1024
+
+    # Shared secret for POST /snaps/purge, so a scheduler can clean up expired
+    # snaps. The endpoint is disabled while this is unset.
+    cron_secret: str | None = None
+
     # Ceiling for the base64 photo payload on /estimate-photo.
     max_photo_bytes: int = 8 * 1024 * 1024
 

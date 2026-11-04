@@ -37,3 +37,10 @@ services:
       # Comma separated list of allowed web origins.
       - key: CORS_ORIGINS
         sync: false
+      # Lets the backend store and sign snap photos. Supabase > Project
+      # Settings > API > service_role (secret).
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Any long random string; lets a scheduler call POST /snaps/purge.
+      - key: CRON_SECRET
+        sync: false

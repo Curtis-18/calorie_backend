@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import date as date_type, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.dates import resolve_today
 from app.core.security import get_current_user_id
 from app.models.friendship import Block, Friendship
 from app.models.user import Profile
@@ -22,6 +23,7 @@ from app.services.friends_service import (
     can_accept,
     decide_request,
 )
+from app.services.snap_streaks import streaks_with
 from app.services.username_service import validate_username
 
 log = logging.getLogger("calorie_backend")
@@ -115,6 +117,7 @@ async def _gather(db: AsyncSession, me: uuid.UUID, name: str):
 
 @router.get("/friends", response_model=FriendsOut)
 async def list_friends(
+    date: date_type | None = None,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
@@ -142,6 +145,19 @@ async def list_friends(
             outgoing.append(person)
         else:
             incoming.append(person)
+
+    if date is not None and friends:
+        # Streaks are a bonus: if the snaps tables aren't there yet (migration
+        # not run) the friends list must still load.
+        try:
+            streaks = await streaks_with(db, user_id, [p.user_id for p in friends], resolve_today(date))
+            for p in friends:
+                s = streaks[p.user_id]
+                p.streak, p.sent_today, p.they_sent_today = s.count, s.sent_today, s.they_sent_today
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("could not load pair streaks")
 
     friends.sort(key=lambda p: p.username.lower())
     incoming.sort(key=lambda p: p.since, reverse=True)

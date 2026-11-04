@@ -17,6 +17,10 @@ class PersonOut(BaseModel):
     user_id: uuid.UUID
     username: str
     since: datetime
+    # Friends only (when the app sends ?date=): the pair streak with them.
+    streak: int | None = None
+    sent_today: bool | None = None  # you have sent them a snap today
+    they_sent_today: bool | None = None  # they have sent you one today
 
 
 class FriendsOut(BaseModel):
