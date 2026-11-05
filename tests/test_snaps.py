@@ -176,6 +176,7 @@ def test_a_good_snap_is_uploaded_saved_and_reports_the_streak(client, storage):
         _Result(),                           # snap_days insert
         _Result(rows=[(SAM, "Sam")]),        # usernames
         _Result(rows=[(ME, SAM, today), (SAM, ME, today)]),  # they already sent today
+        _Result(rows=[(ME, "Me")]),         # the sender's name, for the notification
     )
     _with_db(db)
     r = client.post("/snaps", json=body(caption=" yum "))

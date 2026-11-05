@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # snaps. The endpoint is disabled while this is unset.
     cron_secret: str | None = None
 
+    # How push notifications are delivered. "dry_run" (the default) records what
+    # would be sent in notification_log and sends nothing; real delivery needs
+    # the Apple/Firebase credentials and a provider added in push_sender.py.
+    push_mode: str = "dry_run"
+    push_daily_cap: int = 2
+
     # Ceiling for the base64 photo payload on /estimate-photo.
     max_photo_bytes: int = 8 * 1024 * 1024
 

@@ -27,6 +27,8 @@ from app.schemas.snaps import (
     SnapSentOut,
 )
 from app.services import storage_service
+from app.services.notification_rules import Kind
+from app.services.notifier import notify_user
 from app.services.snap_streaks import streaks_with
 from app.services.storage_service import StorageUnavailable
 
@@ -126,6 +128,7 @@ async def _recipient_summaries(db, me, recipient_ids, today, completed_now: bool
 @router.post("", response_model=SnapSentOut)
 async def send_snap(
     data: SnapIn,
+    background: BackgroundTasks,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
@@ -197,11 +200,12 @@ async def send_snap(
             pass
         raise HTTPException(500, "Couldn't send that snap. Please try again.")
 
-    return {
-        "snap_id": data.id,
-        "expires_at": expires,
-        "recipients": await _recipient_summaries(db, user_id, recipients, today, completed_now=True),
-    }
+    summaries = await _recipient_summaries(db, user_id, recipients, today, completed_now=True)
+    sender_name = (await _usernames(db, [user_id])).get(user_id, "A friend")
+    for r in recipients:
+        # After the response, and never allowed to fail the send.
+        background.add_task(notify_user, r, Kind.FRIEND_SNAP, dedupe_key=f"snap:{data.id}", name=sender_name)
+    return {"snap_id": data.id, "expires_at": expires, "recipients": summaries}
 
 
 @router.get("/inbox", response_model=list[InboxSnapOut])
@@ -319,18 +323,23 @@ async def mark_viewed(
 async def react(
     snap_id: uuid.UUID,
     data: ReactIn,
+    background: BackgroundTasks,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     if data.emoji not in REACTIONS:
         raise HTTPException(422, "That reaction isn't available.")
-    await _received_from(db, snap_id, user_id)
+    sender = await _received_from(db, snap_id, user_id)
     await db.execute(
         update(SnapRecipient)
         .where(SnapRecipient.snap_id == snap_id, SnapRecipient.recipient_id == user_id)
         .values(reaction=data.emoji, reacted_at=_now())
     )
     await db.commit()
+    my_name = (await _usernames(db, [user_id])).get(user_id, "A friend")
+    background.add_task(
+        notify_user, sender, Kind.REACTION, dedupe_key=f"react:{snap_id}:{user_id}:{data.emoji}", name=my_name, emoji=data.emoji
+    )
     return None
 
 
