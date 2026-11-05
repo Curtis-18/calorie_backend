@@ -15,7 +15,18 @@ from app.models.friendship import Friendship
 from app.models.notification import DeviceToken, NotificationLog, NotificationPrefs
 from app.models.user import Profile
 from app.schemas.notifications import DeviceIn, PrefsIn, PrefsOut
-from app.services.notification_rules import Kind, in_reminder_window, local_time, pick_streak_to_save
+from app.models.food_log import FoodLog
+from app.services.notification_rules import (
+    LOG_REMINDER_WINDOW,
+    MY_STREAK_WINDOW,
+    Kind,
+    in_reminder_window,
+    in_window,
+    local_time,
+    own_reminders,
+    pick_streak_to_save,
+)
+from app.services.progress_service import LogRow, compute_progress
 from app.services.notifier import notify, prefs_from_row
 from app.services.snap_streaks import streaks_with
 
@@ -121,17 +132,33 @@ async def remove_device(
     return None
 
 
+async def _logging_state(db: AsyncSession, uid: uuid.UUID, today) -> tuple[int, bool]:
+    """(current logging streak, logged something today) using the same maths
+    as the Progress screen, so a reminder never disagrees with the app."""
+    result = await db.execute(
+        select(
+            FoodLog.log_date, FoodLog.meal_type, FoodLog.source, FoodLog.calories, FoodLog.protein_g, FoodLog.timestamp
+        ).where(FoodLog.user_id == uid, FoodLog.log_date <= today)
+    )
+    progress = compute_progress([LogRow(*row) for row in result.all()], today=today, calorie_target=None, protein_target=None)
+    return progress["streak"]["current"], progress["streak"]["logged_today"]
+
+
 @router.post("/cron/streak-reminders")
 async def streak_reminders(
     x_cron_secret: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    """For a scheduler, run hourly: remind people whose pair streak ends tonight.
+    """For a scheduler, run hourly. Sends the reminders that are due for each
+    person at their own local time, each at most once a day (the day's dedupe
+    key) and always through the daily cap, quiet hours and switches:
 
-    Only people whose local time is in the early evening are looked at, and at
-    most one reminder goes out per person per day (the day's dedupe key), for
-    the longest streak where they still owe a snap. Disabled until CRON_SECRET
-    is set.
+    - afternoon: "you haven't logged anything today"
+    - evening: "your logging streak ends tonight" (only with a running streak)
+    - evening: "your streak with a friend ends tonight" (a bite is owed)
+
+    Disabled until CRON_SECRET is set. The path keeps its old name so an
+    existing schedule keeps working.
     """
     if not settings.cron_secret:
         raise HTTPException(404, "Not found")
@@ -148,41 +175,62 @@ async def streak_reminders(
     } if user_ids else {}
 
     results = {"checked": 0, "sent": 0}
+
+    def counted(status: str) -> None:
+        if status in ("sent", "dry_run"):
+            results["sent"] += 1
+
     for uid in user_ids:
         prefs = prefs_from_row(pref_rows.get(uid))
         local = local_time(now, prefs)
-        if not in_reminder_window(local.hour):
+        day = local.date().isoformat()
+        wants_pair = in_reminder_window(local.hour)
+        wants_own = in_window(local.hour, LOG_REMINDER_WINDOW) or in_window(local.hour, MY_STREAK_WINDOW)
+        if not (wants_pair or wants_own):
             continue
         results["checked"] += 1
-        try:
-            pairs = (
-                await db.execute(
-                    select(Friendship.requester_id, Friendship.addressee_id).where(
-                        Friendship.status == "accepted",
-                        (Friendship.requester_id == uid) | (Friendship.addressee_id == uid),
+
+        # Your own logging first: it is the more important reminder.
+        if wants_own:
+            try:
+                streak, logged_today = await _logging_state(db, uid, local.date())
+                for kind, prefix in own_reminders(local.hour, logged_today=logged_today, streak=streak):
+                    counted(await notify(db, uid, kind, dedupe_key=f"{prefix}:{day}", count=streak, now=now))
+            except Exception:  # noqa: BLE001 - one person's failure must not stop the rest
+                log.exception("logging reminder failed for a user")
+
+        if wants_pair:
+            try:
+                pairs = (
+                    await db.execute(
+                        select(Friendship.requester_id, Friendship.addressee_id).where(
+                            Friendship.status == "accepted",
+                            (Friendship.requester_id == uid) | (Friendship.addressee_id == uid),
+                        )
                     )
+                ).all()
+                friend_ids = [b if a == uid else a for a, b in pairs]
+                if not friend_ids:
+                    continue
+                streaks = await streaks_with(db, uid, friend_ids, local.date())
+                names = {
+                    i: n
+                    for i, n in (
+                        await db.execute(select(Profile.id, Profile.username).where(Profile.id.in_(friend_ids)))
+                    ).all()
+                    if n
+                }
+                pick = pick_streak_to_save(
+                    [(names[f], s.count, s.sent_today) for f, s in streaks.items() if f in names]
                 )
-            ).all()
-            friend_ids = [b if a == uid else a for a, b in pairs]
-            if not friend_ids:
-                continue
-            streaks = await streaks_with(db, uid, friend_ids, local.date())
-            names = {
-                i: n
-                for i, n in (await db.execute(select(Profile.id, Profile.username).where(Profile.id.in_(friend_ids)))).all()
-                if n
-            }
-            pick = pick_streak_to_save([(names[f], s.count, s.sent_today) for f, s in streaks.items() if f in names])
-            if pick is None:
-                continue
-            name, count = pick
-            status = await notify(
-                db, uid, Kind.STREAK_AT_RISK, dedupe_key=f"streak:{local.date().isoformat()}", name=name, count=count, now=now
-            )
-            if status in ("sent", "dry_run"):
-                results["sent"] += 1
-        except Exception:  # noqa: BLE001 - one person's failure must not stop the rest
-            log.exception("streak reminder failed for a user")
+                if pick is None:
+                    continue
+                name, count = pick
+                counted(
+                    await notify(db, uid, Kind.STREAK_AT_RISK, dedupe_key=f"streak:{day}", name=name, count=count, now=now)
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("streak reminder failed for a user")
 
     await db.execute(delete(NotificationLog).where(NotificationLog.created_at < now - LOG_KEEP))
     await db.commit()

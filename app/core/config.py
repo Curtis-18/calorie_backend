@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # would be sent in notification_log and sends nothing; real delivery needs
     # the Apple/Firebase credentials and a provider added in push_sender.py.
     push_mode: str = "dry_run"
-    push_daily_cap: int = 2
+    push_daily_cap: int = 3
 
     # Ceiling for the base64 photo payload on /estimate-photo.
     max_photo_bytes: int = 8 * 1024 * 1024

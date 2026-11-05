@@ -43,9 +43,9 @@ def test_a_normal_daytime_notification_is_allowed():
 
 
 def test_the_daily_cap_is_hard():
-    assert DAILY_CAP == 2
-    assert decide(Kind.FRIEND_SNAP, Prefs(), at(12), sent_today=1).allowed
-    d = decide(Kind.FRIEND_SNAP, Prefs(), at(12), sent_today=2)
+    assert DAILY_CAP == 3
+    assert decide(Kind.FRIEND_SNAP, Prefs(), at(12), sent_today=2).allowed
+    d = decide(Kind.FRIEND_SNAP, Prefs(), at(12), sent_today=3)
     assert not d.allowed and d.reason == "daily_cap"
 
 
@@ -91,7 +91,7 @@ BANNED = ("calorie", "kcal", "weight", "diet", "fat", "skipped", "missed", "fail
 
 
 @pytest.mark.parametrize("kind", list(Kind))
-def test_copy_is_short_playful_and_never_about_food_numbers_or_guilt(kind):
+def test_copy_is_short_and_never_about_food_numbers_or_guilt(kind):
     for key in ("a", "b", "c", "d", "e", "f"):
         title, body = copy_for(kind, key, name="sam", emoji="🔥", count=6)
         text = f"{title} {body}".lower()
@@ -206,8 +206,8 @@ async def test_a_good_notification_is_logged_and_sent(sent):
 
 
 @pytest.mark.asyncio
-async def test_the_cap_stops_the_third_one(sent):
-    db = _Db(_Result(rows=["tok"]), _Result(None), _Result(2))
+async def test_the_cap_stops_the_fourth_one(sent):
+    db = _Db(_Result(rows=["tok"]), _Result(None), _Result(3))
     assert await _notify(db, name="sam") == "daily_cap"
     assert not sent
 
@@ -294,7 +294,7 @@ def test_prefs_default_when_nothing_is_saved(client):
     assert r.status_code == 200
     out = r.json()
     assert out["friend_snaps"] and out["streak_reminders"] and out["milestones"]
-    assert (out["quiet_start"], out["quiet_end"], out["daily_cap"]) == (22, 8, 2)
+    assert (out["quiet_start"], out["quiet_end"], out["daily_cap"]) == (22, 8, 3)
     assert out["meal_nudge_hour"] is None and out["paused_until"] is None
 
 
@@ -359,3 +359,42 @@ def test_the_streak_cron_with_nobody_registered_does_nothing(client, monkeypatch
     _with_db(_Db(_Result(rows=[]), _Result()))  # no device owners; log cleanup
     r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
     assert r.status_code == 200 and r.json() == {"checked": 0, "sent": 0}
+
+
+# --- reminders about your own logging ---------------------------------------
+
+from app.services.notification_rules import own_reminders  # noqa: E402
+
+
+def test_nothing_is_due_once_you_have_logged_today():
+    for hour in (15, 19, 21):
+        assert own_reminders(hour, logged_today=True, streak=9) == []
+
+
+def test_afternoon_nudges_anyone_who_has_logged_nothing():
+    assert own_reminders(15, logged_today=False, streak=0) == [(Kind.LOG_REMINDER, "nolog")]
+    assert own_reminders(15, logged_today=False, streak=5) == [(Kind.LOG_REMINDER, "nolog")]
+
+
+def test_evening_warns_only_a_running_streak():
+    assert own_reminders(20, logged_today=False, streak=4) == [(Kind.MY_STREAK_AT_RISK, "mystreak")]
+    assert own_reminders(20, logged_today=False, streak=0) == []
+
+
+def test_no_logging_reminders_in_the_morning_or_late_night():
+    for hour in (6, 9, 12, 13, 22, 23):
+        assert own_reminders(hour, logged_today=False, streak=4) == []
+
+
+def test_the_new_reminders_respect_the_streak_switch_and_quiet_hours():
+    assert not decide(Kind.LOG_REMINDER, Prefs(streak_reminders=False), at(15), 0).allowed
+    assert not decide(Kind.MY_STREAK_AT_RISK, Prefs(streak_reminders=False), at(20), 0).allowed
+    assert decide(Kind.MY_STREAK_AT_RISK, Prefs(), at(20), 0).allowed
+
+
+@pytest.mark.parametrize("kind", [Kind.LOG_REMINDER, Kind.MY_STREAK_AT_RISK])
+def test_logging_reminder_copy_is_short_and_has_no_numbers_about_food(kind):
+    for key in ("a", "b", "c", "d", "e"):
+        title, body = copy_for(kind, key, count=12)
+        assert len(title) <= 60 and len(body) <= 90
+        assert "kcal" not in (title + body).lower() and "calorie" not in (title + body).lower()

@@ -37,7 +37,7 @@ log = logging.getLogger("calorie_backend")
 router = APIRouter(prefix="/snaps", tags=["snaps"])
 
 SNAP_LIFETIME = timedelta(hours=24)
-NOT_SET_UP = "Snaps aren't available right now. Please try again later."
+NOT_SET_UP = "Bites aren't available right now. Please try again later."
 
 
 def image_type(data: bytes) -> tuple[str, str] | None:
@@ -138,12 +138,12 @@ async def send_snap(
     today = resolve_today(data.date)
     recipients = list(dict.fromkeys(data.recipient_ids))  # drop duplicates, keep order
     if user_id in recipients:
-        raise HTTPException(422, "You can't send a snap to yourself.")
+        raise HTTPException(422, "You can't send a bite to yourself.")
 
     existing = (await db.execute(select(Snap).where(Snap.id == data.id))).scalar_one_or_none()
     if existing is not None:
         if existing.sender_id != user_id:
-            raise HTTPException(409, "That snap id is already used.")
+            raise HTTPException(409, "That bite id is already used.")
         sent_to = (
             await db.execute(select(SnapRecipient.recipient_id).where(SnapRecipient.snap_id == data.id))
         ).scalars().all()
@@ -168,7 +168,7 @@ async def send_snap(
     mime, ext = kind
 
     if not set(recipients) <= await _friend_ids(db, user_id):
-        raise HTTPException(403, "You can only send snaps to your friends.")
+        raise HTTPException(403, "You can only send bites to your friends.")
 
     path = f"{user_id}/{data.id}.{ext}"
     try:
@@ -198,7 +198,7 @@ async def send_snap(
             await storage_service.delete([path])
         except StorageUnavailable:
             pass
-        raise HTTPException(500, "Couldn't send that snap. Please try again.")
+        raise HTTPException(500, "Couldn't send that bite. Please try again.")
 
     summaries = await _recipient_summaries(db, user_id, recipients, today, completed_now=True)
     sender_name = (await _usernames(db, [user_id])).get(user_id, "A friend")
@@ -298,7 +298,7 @@ async def _received_from(db: AsyncSession, snap_id: uuid.UUID, me: uuid.UUID) ->
         )
     ).scalar_one_or_none()
     if sender is None:
-        raise HTTPException(404, "That snap has disappeared.")
+        raise HTTPException(404, "That bite has disappeared.")
     return sender
 
 
@@ -372,11 +372,11 @@ async def delete_snap(
         await db.execute(select(Snap.storage_path).where(Snap.id == snap_id, Snap.sender_id == user_id))
     ).scalar_one_or_none()
     if path is None:
-        raise HTTPException(404, "That snap isn't there any more.")
+        raise HTTPException(404, "That bite isn't there any more.")
     try:
         await storage_service.delete([path])
     except StorageUnavailable:
-        raise HTTPException(502, "Couldn't delete that snap. Please try again.")
+        raise HTTPException(502, "Couldn't delete that bite. Please try again.")
     await db.execute(delete(Snap).where(Snap.id == snap_id))
     await db.commit()
     return None

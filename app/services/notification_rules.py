@@ -5,10 +5,10 @@ easy to test. The principles, in order of importance:
 
 1. Never more than DAILY_CAP a day, counted in the person's own day.
 2. Never during quiet hours or while they have paused notifications.
-3. Only for something real: a friend's snap or reaction, a streak about to
-   break, a milestone. Never "we miss you".
-4. Never about weight, calories or a missed meal, and never guilt. Copy is
-   playful and short.
+3. Only for something real: a friend's bite or reaction, a streak about to
+   break, a milestone, or (at the person's request) a reminder that nothing
+   is logged yet today. Never "we miss you".
+4. Never about weight or calories, and never guilt. Copy is short and light.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 
-DAILY_CAP = 2
+DAILY_CAP = 3
 
 
 class Kind(str, Enum):
@@ -28,6 +28,8 @@ class Kind(str, Enum):
     STREAK_FREEZE = "streak_freeze"
     MILESTONE = "milestone"
     MEAL_NUDGE = "meal_nudge"
+    LOG_REMINDER = "log_reminder"          # nothing logged yet today
+    MY_STREAK_AT_RISK = "my_streak_at_risk"  # your own logging streak ends tonight
 
 
 # Which preference switch controls which kind.
@@ -38,6 +40,8 @@ _SWITCH = {
     Kind.STREAK_FREEZE: "streak_reminders",
     Kind.MILESTONE: "milestones",
     Kind.MEAL_NUDGE: None,  # scheduled on the phone, by its own hour setting
+    Kind.LOG_REMINDER: "streak_reminders",
+    Kind.MY_STREAK_AT_RISK: "streak_reminders",
 }
 
 
@@ -100,17 +104,17 @@ def decide(kind: Kind, prefs: Prefs, now_utc: datetime, sent_today: int, *, cap:
 
 _COPY: dict[Kind, list[tuple[str, str]]] = {
     Kind.FRIEND_SNAP: [
-        ("🍜 {name} sent you a snap", "Take a look before it melts away."),
-        ("👀 New snap from {name}", "What's on their plate? It's gone in 24 hours."),
+        ("🍜 {name} sent you a bite", "Take a look before it melts away."),
+        ("👀 New bite from {name}", "What's on their plate? It's gone in 24 hours."),
         ("📸 {name} is eating something good", "Tap to peek."),
     ],
     Kind.REACTION: [
-        ("{emoji} {name} reacted to your snap", "Your plate got noticed."),
+        ("{emoji} {name} reacted to your bite", "Your plate got noticed."),
         ("{name} sent {emoji}", "Somebody liked what they saw."),
     ],
     Kind.STREAK_AT_RISK: [
-        ("🔥 Your {count}-day streak with {name} ends tonight", "One snap keeps it burning."),
-        ("⏳ {name} and you: {count} days strong", "Send a snap before midnight to keep it going."),
+        ("🔥 Your {count}-day streak with {name} ends tonight", "One bite keeps it burning."),
+        ("⏳ {name} and you: {count} days strong", "Send a bite before midnight to keep it going."),
     ],
     Kind.STREAK_FREEZE: [
         ("🧊 A freeze covered yesterday", "Your {count}-day flame is safe."),
@@ -119,8 +123,18 @@ _COPY: dict[Kind, list[tuple[str, str]]] = {
         ("🏅 New badge: {name}", "You earned it. Come and see."),
         ("⭐ Level {count}!", "Every meal you log is paying off."),
     ],
+    Kind.LOG_REMINDER: [
+        ("🍽️ Nothing logged yet today", "Add what you've eaten so far, it takes a minute."),
+        ("👋 Haven't logged anything today", "Tap in and add your first meal."),
+        ("📝 Today's log is empty", "Log a meal to get your day going."),
+    ],
+    Kind.MY_STREAK_AT_RISK: [
+        ("🔥 Your {count}-day streak ends tonight", "Log a meal before midnight to keep it."),
+        ("⏳ {count} days in a row, don't stop now", "One meal logged keeps your flame alive."),
+        ("🚨 Streak alert: {count} days on the line", "Log something before the day ends."),
+    ],
     Kind.MEAL_NUDGE: [
-        ("🍽️ Time for a snack snap?", "A photo takes five seconds."),
+        ("🍽️ Time for a snack bite?", "A photo takes five seconds."),
     ],
 }
 
@@ -148,10 +162,38 @@ def in_reminder_window(local_hour: int) -> bool:
 def pick_streak_to_save(candidates: list[tuple[str, int, bool]]) -> tuple[str, int] | None:
     """[candidates]: (friend name, streak length, I have already sent today).
 
-    The one worth a reminder is a running streak where I still owe a snap.
+    The one worth a reminder is a running streak where I still owe a bite.
     With several, the longest wins, then the name, so the choice is stable.
     """
     owed = [(name, count) for name, count, sent_today in candidates if count > 0 and not sent_today]
     if not owed:
         return None
     return sorted(owed, key=lambda c: (-c[1], c[0].lower()))[0]
+
+
+# Local hours for the reminders about your own logging. Both are looked at by an
+# hourly scheduler and the day's dedupe key keeps each to one a day.
+LOG_REMINDER_WINDOW = (14, 17)   # "you haven't logged anything today"
+MY_STREAK_WINDOW = (18, 22)      # "your streak ends tonight" (quiet hours still apply)
+
+
+def in_window(local_hour: int, window: tuple[int, int]) -> bool:
+    return window[0] <= local_hour < window[1]
+
+
+def own_reminders(local_hour: int, *, logged_today: bool, streak: int) -> list[tuple[Kind, str]]:
+    """Which reminders about the person's own logging are due at [local_hour].
+
+    Returns (kind, dedupe prefix) pairs, most important first. Nothing is due
+    once something is logged today. A running streak gets the sharper
+    "ends tonight" reminder in the evening; an afternoon "nothing logged yet"
+    goes to everyone who has logged nothing.
+    """
+    if logged_today:
+        return []
+    due: list[tuple[Kind, str]] = []
+    if streak > 0 and in_window(local_hour, MY_STREAK_WINDOW):
+        due.append((Kind.MY_STREAK_AT_RISK, "mystreak"))
+    if in_window(local_hour, LOG_REMINDER_WINDOW):
+        due.append((Kind.LOG_REMINDER, "nolog"))
+    return due
