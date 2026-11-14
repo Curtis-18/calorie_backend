@@ -17,7 +17,7 @@ from app.models.story import ContentReport, ProfileAvatar
 from app.models.user import Profile
 from app.schemas.friends import FriendRequestIn, FriendsOut, PersonFoundOut, PersonOut, RequestResultOut
 from app.schemas.snaps import ReportIn
-from app.services import avatars
+from app.services import avatars, storage_service
 from app.services.friends_service import (
     FRIEND_LIMIT,
     MESSAGES,
@@ -203,9 +203,22 @@ async def search_people(
         )
     )
     name = func.lower(Profile.username)
+    # One statement for the names, how each person stands with you and where
+    # their picture is. This runs on every pause in typing and each round trip
+    # to the database is slow from here; it used to be three.
     found = (
         await db.execute(
-            select(Profile.id, Profile.username)
+            select(
+                Profile.id, Profile.username, Friendship.requester_id, Friendship.status, ProfileAvatar.storage_path
+            )
+            .outerjoin(
+                Friendship,
+                or_(
+                    and_(Friendship.requester_id == user_id, Friendship.addressee_id == Profile.id),
+                    and_(Friendship.addressee_id == user_id, Friendship.requester_id == Profile.id),
+                ),
+            )
+            .outerjoin(ProfileAvatar, ProfileAvatar.user_id == Profile.id)
             .where(
                 Profile.username.is_not(None),
                 # autoescape: "_" is allowed in usernames and is a wildcard in LIKE.
@@ -220,34 +233,24 @@ async def search_people(
     if not found:
         return []
 
-    ids = [pid for pid, _ in found]
-    links = (
-        await db.execute(
-            select(Friendship.requester_id, Friendship.addressee_id, Friendship.status).where(
-                or_(
-                    and_(Friendship.requester_id == user_id, Friendship.addressee_id.in_(ids)),
-                    and_(Friendship.addressee_id == user_id, Friendship.requester_id.in_(ids)),
-                )
-            )
-        )
-    ).all()
-    standing = {
-        (addressee if requester == user_id else requester): relation_to(user_id, requester, status)
-        for requester, addressee, status in links
-    }
-
-    # Pictures are a bonus and never fail the search.
-    try:
-        pictures = await avatars.avatar_urls(db, ids)
-    except Exception:  # noqa: BLE001
-        log.exception("could not load pictures for people search")
-        pictures = {}
+    # Pictures are a bonus and never fail the search. Links are remembered, so
+    # this only talks to storage for a picture it hasn't signed recently.
+    links: dict[str, str] = {}
+    paths = [path for *_, path in found if path]
+    if paths and storage_service.configured():
+        try:
+            links = await avatars.links_for(paths)
+        except Exception:  # noqa: BLE001
+            log.exception("could not load pictures for people search")
 
     return [
         PersonFoundOut(
-            user_id=pid, username=username, avatar_url=pictures.get(pid), relation=standing.get(pid, "none")
+            user_id=pid,
+            username=username,
+            avatar_url=links.get(path) if path else None,
+            relation=relation_to(user_id, requester, status),
         )
-        for pid, username in found
+        for pid, username, requester, status, path in found
     ]
 
 

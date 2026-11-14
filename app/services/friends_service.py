@@ -95,7 +95,8 @@ MESSAGES = {
 
 SEARCH_MIN_CHARS = 2
 SEARCH_LIMIT = 8
-_SEARCH_OK = re.compile(r"^[a-z0-9_]{%d,20}$" % SEARCH_MIN_CHARS)
+# Usernames start with a letter.
+_SEARCH_OK = re.compile(r"^[a-z][a-z0-9_]{%d,19}$" % (SEARCH_MIN_CHARS - 1))
 
 
 def search_prefix(q: str) -> str | None:

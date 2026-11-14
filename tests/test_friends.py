@@ -290,6 +290,8 @@ def test_search_prefix_needs_two_valid_characters():
     assert search_prefix("s") is None  # one letter would list a slice of everyone
     assert search_prefix("") is None
     assert search_prefix("sam%") is None
+    assert search_prefix("1bad") is None
+    assert search_prefix("_x") is None
     assert search_prefix("a b") is None
     assert search_prefix("x" * 21) is None
 
@@ -303,30 +305,67 @@ def test_relation_to_reads_from_my_side():
     assert relation_to(ME, SAM, "pending") == "wants_you"
 
 
-def _no_pictures(monkeypatch):
-    from app.services import avatars
-
-    async def none(db, ids):
-        return {}
-
-    monkeypatch.setattr(avatars, "avatar_urls", none)
-
-
-def test_search_returns_matches_with_how_they_stand(client, monkeypatch):
+def test_search_returns_matches_with_how_they_stand_in_one_query(client, monkeypatch):
     from app.core.rate_limit import people_searches
+    from app.services import avatars, storage_service
 
     people_searches.reset()
-    _no_pictures(monkeypatch)
+    signed = []
+
+    async def links_for(paths):
+        signed.append(paths)
+        return {p: f"https://pics/{p}" for p in paths}
+
+    monkeypatch.setattr(avatars, "links_for", links_for)
+    monkeypatch.setattr(storage_service, "configured", lambda: True)
     bea = uuid.uuid4()
     db = _Db(
-        _Result(rows=[(SAM, "Sam"), (bea, "Sammy")]),
-        _Result(rows=[(ME, SAM, "pending")]),  # I already asked Sam
+        _Result(rows=[
+            (SAM, "Sam", ME, "pending", None),  # I already asked Sam
+            (bea, "Sammy", None, None, "bea/avatar-1.jpg"),
+        ]),
     )
     _with_db(db)
     r = client.get("/friends/search", params={"q": "@sa"})
     assert r.status_code == 200
-    assert [(p["username"], p["relation"]) for p in r.json()] == [("Sam", "requested"), ("Sammy", "none")]
-    assert db.statements == ["SELECT", "SELECT"]
+    assert [(p["username"], p["relation"], p["avatar_url"]) for p in r.json()] == [
+        ("Sam", "requested", None),
+        ("Sammy", "none", "https://pics/bea/avatar-1.jpg"),
+    ]
+    assert db.statements == ["SELECT"]  # one round trip, not three
+    assert signed == [["bea/avatar-1.jpg"]]
+
+
+def test_search_without_pictures_never_calls_storage(client, monkeypatch):
+    from app.core.rate_limit import people_searches
+    from app.services import avatars
+
+    people_searches.reset()
+
+    async def boom(paths):
+        raise AssertionError("no pictures to sign")
+
+    monkeypatch.setattr(avatars, "links_for", boom)
+    _with_db(_Db(_Result(rows=[(SAM, "Sam", SAM, "accepted", None)])))
+    r = client.get("/friends/search", params={"q": "sa"})
+    assert [(p["username"], p["relation"]) for p in r.json()] == [("Sam", "friend")]
+
+
+def test_search_still_answers_when_pictures_fail(client, monkeypatch):
+    from app.core.rate_limit import people_searches
+    from app.services import avatars, storage_service
+
+    people_searches.reset()
+
+    async def boom(paths):
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr(avatars, "links_for", boom)
+    monkeypatch.setattr(storage_service, "configured", lambda: True)
+    _with_db(_Db(_Result(rows=[(SAM, "Sam", None, None, "sam/avatar-1.jpg")])))
+    r = client.get("/friends/search", params={"q": "sa"})
+    assert r.status_code == 200
+    assert r.json()[0]["username"] == "Sam" and r.json()[0]["avatar_url"] is None
 
 
 def test_search_ignores_what_cannot_match_without_touching_the_database(client):
@@ -365,6 +404,7 @@ def test_search_escapes_underscore_and_excludes_me_and_blocked(client, monkeypat
     assert "NOT (EXISTS" in sql and "blocks" in sql
     assert "profiles.id != " in sql
     assert "LIMIT 8" in sql
+    assert "LEFT OUTER JOIN friendships" in sql and "LEFT OUTER JOIN profile_avatars" in sql
 
 
 def test_search_is_rate_limited(client):
