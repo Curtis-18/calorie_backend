@@ -278,3 +278,105 @@ def test_an_empty_list(client):
 def test_friend_routes_need_a_login(anon_client):
     for method, path in [("get", "/friends"), ("post", "/friends/requests"), ("get", "/blocks")]:
         assert getattr(anon_client, method)(path).status_code in (401, 403)
+
+
+# --- search as you type ------------------------------------------------------
+
+def test_search_prefix_needs_two_valid_characters():
+    from app.services.friends_service import search_prefix
+
+    assert search_prefix(" @Sa ") == "sa"
+    assert search_prefix("river_s") == "river_s"
+    assert search_prefix("s") is None  # one letter would list a slice of everyone
+    assert search_prefix("") is None
+    assert search_prefix("sam%") is None
+    assert search_prefix("a b") is None
+    assert search_prefix("x" * 21) is None
+
+
+def test_relation_to_reads_from_my_side():
+    from app.services.friends_service import relation_to
+
+    assert relation_to(ME, None, None) == "none"
+    assert relation_to(ME, SAM, "accepted") == "friend"
+    assert relation_to(ME, ME, "pending") == "requested"
+    assert relation_to(ME, SAM, "pending") == "wants_you"
+
+
+def _no_pictures(monkeypatch):
+    from app.services import avatars
+
+    async def none(db, ids):
+        return {}
+
+    monkeypatch.setattr(avatars, "avatar_urls", none)
+
+
+def test_search_returns_matches_with_how_they_stand(client, monkeypatch):
+    from app.core.rate_limit import people_searches
+
+    people_searches.reset()
+    _no_pictures(monkeypatch)
+    bea = uuid.uuid4()
+    db = _Db(
+        _Result(rows=[(SAM, "Sam"), (bea, "Sammy")]),
+        _Result(rows=[(ME, SAM, "pending")]),  # I already asked Sam
+    )
+    _with_db(db)
+    r = client.get("/friends/search", params={"q": "@sa"})
+    assert r.status_code == 200
+    assert [(p["username"], p["relation"]) for p in r.json()] == [("Sam", "requested"), ("Sammy", "none")]
+    assert db.statements == ["SELECT", "SELECT"]
+
+
+def test_search_ignores_what_cannot_match_without_touching_the_database(client):
+    db = _Db()
+    _with_db(db)
+    for q in ["", "s", "sam!", "%%"]:
+        assert client.get("/friends/search", params={"q": q}).json() == []
+    assert db.statements == []
+
+
+def test_search_with_no_match_is_an_empty_list(client):
+    from app.core.rate_limit import people_searches
+
+    people_searches.reset()
+    _with_db(_Db(_Result(rows=[])))
+    assert client.get("/friends/search", params={"q": "zz"}).json() == []
+
+
+def test_search_escapes_underscore_and_excludes_me_and_blocked(client, monkeypatch):
+    """The statement itself: "_" must not act as a wildcard, and the filter
+    for yourself and for blocks in either direction must be in the query."""
+    from app.core.rate_limit import people_searches
+
+    people_searches.reset()
+    seen = []
+
+    class Db(_Db):
+        async def execute(self, stmt):
+            seen.append(stmt)
+            return await super().execute(stmt)
+
+    _with_db(Db(_Result(rows=[])))
+    client.get("/friends/search", params={"q": "a_b"})
+    sql = str(seen[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "a/_b" in sql and "ESCAPE '/'" in sql
+    assert "NOT (EXISTS" in sql and "blocks" in sql
+    assert "profiles.id != " in sql
+    assert "LIMIT 8" in sql
+
+
+def test_search_is_rate_limited(client):
+    from app.core.rate_limit import people_searches
+
+    people_searches.reset()
+    _with_db(_Db(*[_Result(rows=[]) for _ in range(60)]))
+    for _ in range(60):
+        assert client.get("/friends/search", params={"q": "sa"}).status_code == 200
+    assert client.get("/friends/search", params={"q": "sa"}).status_code == 429
+    people_searches.reset()
+
+
+def test_search_needs_a_signed_in_user(anon_client):
+    assert anon_client.get("/friends/search", params={"q": "sa"}).status_code in (401, 403)

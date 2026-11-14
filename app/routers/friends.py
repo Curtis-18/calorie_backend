@@ -2,7 +2,7 @@ import logging
 import uuid
 from datetime import date as date_type, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -10,11 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dates import resolve_today
+from app.core.rate_limit import people_searches
 from app.core.security import get_current_user_id
 from app.models.friendship import Block, Friendship
 from app.models.story import ContentReport, ProfileAvatar
 from app.models.user import Profile
-from app.schemas.friends import FriendRequestIn, FriendsOut, PersonOut, RequestResultOut
+from app.schemas.friends import FriendRequestIn, FriendsOut, PersonFoundOut, PersonOut, RequestResultOut
 from app.schemas.snaps import ReportIn
 from app.services import avatars
 from app.services.friends_service import (
@@ -22,9 +23,12 @@ from app.services.friends_service import (
     MESSAGES,
     ExistingLink,
     Outcome,
+    SEARCH_LIMIT,
     RequestFacts,
     can_accept,
     decide_request,
+    relation_to,
+    search_prefix,
 )
 from app.services.snap_streaks import streaks_with
 from app.services.username_service import validate_username
@@ -174,6 +178,77 @@ async def list_friends(
     incoming.sort(key=lambda p: p.since, reverse=True)
     outgoing.sort(key=lambda p: p.since, reverse=True)
     return {"friends": friends, "incoming": incoming, "outgoing": outgoing, "limit": FRIEND_LIMIT}
+
+
+@router.get("/friends/search", response_model=list[PersonFoundOut])
+async def search_people(
+    q: str = Query("", max_length=64),
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Suggestions while typing a username: people whose name starts with
+    what was typed, shortest (closest) first. Never yourself, and never anyone
+    blocked in either direction, so a block still looks like "no such user".
+    At least two characters, a handful of results and a rate limit keep this
+    from being a way to list everybody."""
+    prefix = search_prefix(q)
+    if prefix is None:
+        return []
+    people_searches.check("people", user_id, "You're searching very fast. Wait a moment and try again.")
+
+    blocked = select(Block.blocker_id).where(
+        or_(
+            and_(Block.blocker_id == user_id, Block.blocked_id == Profile.id),
+            and_(Block.blocker_id == Profile.id, Block.blocked_id == user_id),
+        )
+    )
+    name = func.lower(Profile.username)
+    found = (
+        await db.execute(
+            select(Profile.id, Profile.username)
+            .where(
+                Profile.username.is_not(None),
+                # autoescape: "_" is allowed in usernames and is a wildcard in LIKE.
+                name.startswith(prefix, autoescape=True),
+                Profile.id != user_id,
+                ~blocked.exists(),
+            )
+            .order_by(func.length(Profile.username), name)
+            .limit(SEARCH_LIMIT)
+        )
+    ).all()
+    if not found:
+        return []
+
+    ids = [pid for pid, _ in found]
+    links = (
+        await db.execute(
+            select(Friendship.requester_id, Friendship.addressee_id, Friendship.status).where(
+                or_(
+                    and_(Friendship.requester_id == user_id, Friendship.addressee_id.in_(ids)),
+                    and_(Friendship.addressee_id == user_id, Friendship.requester_id.in_(ids)),
+                )
+            )
+        )
+    ).all()
+    standing = {
+        (addressee if requester == user_id else requester): relation_to(user_id, requester, status)
+        for requester, addressee, status in links
+    }
+
+    # Pictures are a bonus and never fail the search.
+    try:
+        pictures = await avatars.avatar_urls(db, ids)
+    except Exception:  # noqa: BLE001
+        log.exception("could not load pictures for people search")
+        pictures = {}
+
+    return [
+        PersonFoundOut(
+            user_id=pid, username=username, avatar_url=pictures.get(pid), relation=standing.get(pid, "none")
+        )
+        for pid, username in found
+    ]
 
 
 @router.post("/friends/requests", response_model=RequestResultOut)

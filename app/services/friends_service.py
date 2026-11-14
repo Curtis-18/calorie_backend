@@ -4,6 +4,7 @@ The router gathers the facts from the database and applies the result; every
 decision lives here so it can be tested without one.
 """
 
+import re
 import uuid
 from dataclasses import dataclass
 from enum import Enum
@@ -88,3 +89,28 @@ MESSAGES = {
     Outcome.THEM_AT_LIMIT: "That person has reached their friend limit.",
     Outcome.TOO_MANY_PENDING: "You have a lot of requests waiting. Wait for some to be answered first.",
 }
+
+
+# --- finding people as you type ---------------------------------------------
+
+SEARCH_MIN_CHARS = 2
+SEARCH_LIMIT = 8
+_SEARCH_OK = re.compile(r"^[a-z0-9_]{%d,20}$" % SEARCH_MIN_CHARS)
+
+
+def search_prefix(q: str) -> str | None:
+    """The lower-case start of a username to look for, or None when what was
+    typed can't match anyone: too short (one letter would list a slice of
+    everybody), or holding characters no username has."""
+    text = (q or "").strip().lstrip("@").lower()
+    return text if _SEARCH_OK.match(text) else None
+
+
+def relation_to(me: uuid.UUID, requester_id: uuid.UUID | None, status: str | None) -> str:
+    """How a search result stands with [me]: none | friend | requested (you
+    asked them) | wants_you (they asked you)."""
+    if status == "accepted":
+        return "friend"
+    if status == "pending":
+        return "requested" if requester_id == me else "wants_you"
+    return "none"

@@ -49,3 +49,6 @@ class RateLimit:
 photo_scans = RateLimit(30, 3600)
 insight_generations = RateLimit(30, 3600)
 food_searches = RateLimit(90, 60)
+# Typing a name fires a lookup per pause; this is far above that, and stops a
+# script walking the alphabet to list every username.
+people_searches = RateLimit(60, 60)

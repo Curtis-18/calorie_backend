@@ -35,3 +35,13 @@ class RequestResultOut(BaseModel):
     # sent | accepted | already_friends | already_sent
     outcome: str
     username: str
+
+
+class PersonFoundOut(BaseModel):
+    """A suggestion while typing a username."""
+
+    user_id: uuid.UUID
+    username: str
+    avatar_url: str | None = None
+    # none | friend | requested (you asked them) | wants_you (they asked you)
+    relation: str = "none"
