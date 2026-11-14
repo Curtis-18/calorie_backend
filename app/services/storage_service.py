@@ -1,4 +1,4 @@
-"""Supabase Storage for snap photos, through its REST API with the service key.
+"""Supabase Storage for bite, story and profile photos, through its REST API with the service key.
 
 Photos live in a private bucket: nobody can open one without a short-lived
 signed link from here. Every failure becomes [StorageUnavailable] so callers
@@ -50,7 +50,7 @@ async def upload(path: str, data: bytes, mime_type: str) -> None:
         raise StorageUnavailable(f"upload failed with {r.status_code}")
 
 
-async def sign(paths: list[str]) -> dict[str, str | None]:
+async def sign(paths: list[str], expires_in: int = SIGNED_URL_SECONDS) -> dict[str, str | None]:
     """A temporary viewing link for each path (None if one can't be made)."""
     if not paths:
         return {}
@@ -58,7 +58,7 @@ async def sign(paths: list[str]) -> dict[str, str | None]:
     try:
         async with httpx.AsyncClient() as client:
             r = await client.post(
-                url, json={"expiresIn": SIGNED_URL_SECONDS, "paths": paths},
+                url, json={"expiresIn": expires_in, "paths": paths},
                 headers=_headers(), timeout=20.0,
             )
     except httpx.HTTPError as exc:

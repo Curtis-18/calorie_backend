@@ -11,14 +11,15 @@ from app.core.config import Settings, settings
 from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.models.user import Profile
+from app.services import avatars
 from app.routers import (
-    account, foods, friends, insights, logs, notifications, photo_estimation, progress, snaps, targets, username,
+    account, avatar, foods, friends, insights, logs, notifications, photo_estimation, progress, snaps, stories, targets, username,
     weights,
 )
 
 # Import every model before the app serves traffic so Base.metadata knows
 # about all tables and FK targets resolve.
-from app.models import food_log, food_log_nutrients, friendship, insights_cache, notification, snap, target, user, weight_log  # noqa: F401
+from app.models import food_log, food_log_nutrients, friendship, insights_cache, notification, snap, story, target, user, weight_log  # noqa: F401
 
 log = logging.getLogger("calorie_backend")
 
@@ -61,6 +62,8 @@ app.include_router(friends.router)
 app.include_router(snaps.router)
 app.include_router(notifications.router)
 app.include_router(account.router)
+app.include_router(avatar.router)
+app.include_router(stories.router)
 
 
 @app.get("/")
@@ -103,4 +106,6 @@ async def me(
         # as taken. A 503 tells the app it simply doesn't know.
         log.exception("could not read username")
         raise HTTPException(status_code=503, detail="Couldn't load your account. Please try again.")
-    return {"user_id": str(user_id), "username": username}
+    # Never fails: no picture (or no way to read one) is simply None.
+    picture = (await avatars.avatar_urls(db, [user_id])).get(user_id)
+    return {"user_id": str(user_id), "username": username, "avatar_url": picture}

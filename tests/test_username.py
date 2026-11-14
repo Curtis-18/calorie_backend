@@ -156,7 +156,7 @@ def test_recapitalising_your_own_name_is_free_during_cooldown(client):
 
 def test_me_returns_the_username(client):
     _with_db(_Db(_Result("sam")))
-    assert client.get("/me").json() == {"user_id": str(ME), "username": "sam"}
+    assert client.get("/me").json() == {"user_id": str(ME), "username": "sam", "avatar_url": None}
 
 
 def test_me_says_it_does_not_know_when_the_database_fails(client):

@@ -5,7 +5,7 @@ Everything a person owns hangs off their `auth.users` row: `profiles` cascades
 from it, and every app table cascades from `profiles`. So deleting that one row
 removes their food logs, targets, weigh-ins, friendships, blocks, bites,
 notification settings and device tokens. The only thing the database can't
-remove is the bite photos in storage, which go first.
+remove is the photos in storage (bites, stories, profile picture), which go first.
 """
 
 import logging
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import auth_users
 from app.models.snap import Snap
+from app.models.story import ProfileAvatar, Story
 from app.models.user import Profile
 from app.services import storage_service
 
@@ -44,18 +45,32 @@ async def _delete_auth_user_via_api(user_id: uuid.UUID) -> None:
         raise AccountDeletionFailed(f"auth delete failed with {r.status_code}")
 
 
+async def _optional_paths(db: AsyncSession, query) -> list[str]:
+    """Photo paths from a table that may not exist yet (stories and profile
+    pictures arrived in a later migration). A savepoint keeps a missing table
+    from poisoning the transaction."""
+    try:
+        async with db.begin_nested():
+            return list((await db.execute(query)).scalars().all())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("skipping optional photo cleanup: %r", exc)
+        return []
+
+
 async def delete_account(db: AsyncSession, user_id: uuid.UUID) -> None:
     """Remove the person and everything they own. Raises AccountDeletionFailed
     with nothing deleted from the database if a step can't be completed, so
     the app can simply ask them to try again."""
-    # 1. Bite photos. Once the rows are gone nothing would ever find these
+    # 1. Bite, story and profile photos. Once the rows are gone nothing would ever find these
     #    files again, so a failure here stops the deletion rather than leaving
     #    someone's photos behind.
     if storage_service.configured():
-        paths = (await db.execute(select(Snap.storage_path).where(Snap.sender_id == user_id))).scalars().all()
+        paths = list((await db.execute(select(Snap.storage_path).where(Snap.sender_id == user_id))).scalars().all())
+        paths += await _optional_paths(db, select(Story.storage_path).where(Story.user_id == user_id))
+        paths += await _optional_paths(db, select(ProfileAvatar.storage_path).where(ProfileAvatar.user_id == user_id))
         if paths:
             try:
-                await storage_service.delete(list(paths))
+                await storage_service.delete(paths)
             except storage_service.StorageUnavailable as exc:
                 raise AccountDeletionFailed(f"photo cleanup failed: {exc!r}") from exc
 

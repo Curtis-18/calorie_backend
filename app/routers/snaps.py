@@ -27,6 +27,7 @@ from app.schemas.snaps import (
     SnapSentOut,
 )
 from app.services import storage_service
+from app.services.images import image_type  # noqa: F401 - used below and by tests
 from app.services.notification_rules import Kind
 from app.services.notifier import notify_user
 from app.services.snap_streaks import streaks_with
@@ -38,18 +39,6 @@ router = APIRouter(prefix="/snaps", tags=["snaps"])
 
 SNAP_LIFETIME = timedelta(hours=24)
 NOT_SET_UP = "Bites aren't available right now. Please try again later."
-
-
-def image_type(data: bytes) -> tuple[str, str] | None:
-    """(mime type, file extension) from the magic bytes, or None if it is not
-    a JPEG, PNG or WebP. Never trust the client's label."""
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg", "jpg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png", "png"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp", "webp"
-    return None
 
 
 def _require_storage() -> None:
@@ -390,4 +379,6 @@ async def purge(x_cron_secret: str | None = Header(default=None)):
     if not x_cron_secret or not secrets.compare_digest(x_cron_secret, settings.cron_secret):
         raise HTTPException(403, "Forbidden")
     _require_storage()
-    return {"purged": await purge_expired(limit=500)}
+    from app.routers.stories import purge_expired_stories
+
+    return {"purged": await purge_expired(limit=500) + await purge_expired_stories(limit=500)}

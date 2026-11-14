@@ -12,8 +12,11 @@ from app.core.database import get_db
 from app.core.dates import resolve_today
 from app.core.security import get_current_user_id
 from app.models.friendship import Block, Friendship
+from app.models.story import ContentReport, ProfileAvatar
 from app.models.user import Profile
 from app.schemas.friends import FriendRequestIn, FriendsOut, PersonOut, RequestResultOut
+from app.schemas.snaps import ReportIn
+from app.services import avatars
 from app.services.friends_service import (
     FRIEND_LIMIT,
     MESSAGES,
@@ -159,7 +162,15 @@ async def list_friends(
         except Exception:  # noqa: BLE001
             log.exception("could not load pair streaks")
 
-    friends.sort(key=lambda p: p.username.lower())
+    # Pictures are a bonus too, and never fail the list.
+    shown = friends + incoming + outgoing
+    if shown:
+        pictures = await avatars.avatar_urls(db, [p.user_id for p in shown])
+        for p in shown:
+            p.avatar_url = pictures.get(p.user_id)
+
+    # The people you have the longest streaks with come first, always.
+    friends.sort(key=lambda p: (-(p.streak or 0), p.username.lower()))
     incoming.sort(key=lambda p: p.since, reverse=True)
     outgoing.sort(key=lambda p: p.since, reverse=True)
     return {"friends": friends, "incoming": incoming, "outgoing": outgoing, "limit": FRIEND_LIMIT}
@@ -283,6 +294,34 @@ async def block_person(
     await db.execute(
         pg_insert(Block).values(blocker_id=user_id, blocked_id=other).on_conflict_do_nothing()
     )
+    await db.commit()
+    return None
+
+
+@router.post("/friends/{friendship_id}/report-photo", status_code=204)
+async def report_photo(
+    friendship_id: uuid.UUID,
+    data: ReportIn,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Report the profile picture of a friend or of someone in a request.
+    The team reviews reports in the database."""
+    row = (
+        await db.execute(select(Friendship).where(Friendship.id == friendship_id, _involves(user_id)))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "They aren't on your list.")
+    other = row.addressee_id if row.requester_id == user_id else row.requester_id
+    # Which picture it was: they may change it before anyone looks.
+    path = (
+        await db.execute(select(ProfileAvatar.storage_path).where(ProfileAvatar.user_id == other))
+    ).scalar_one_or_none()
+    reason = (data.reason or "").strip()
+    db.add(ContentReport(
+        reporter_id=user_id, reported_user_id=other, kind="avatar",
+        reason=" | ".join(x for x in (reason, f"photo: {path}" if path else "") if x) or None,
+    ))
     await db.commit()
     return None
 

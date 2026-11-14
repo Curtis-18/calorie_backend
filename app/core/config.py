@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     supabase_service_role_key: str | None = None
     snaps_bucket: str = "snaps"
     max_snap_bytes: int = 2 * 1024 * 1024
+    # Profile pictures arrive already shrunk to 512 px by the app.
+    max_avatar_bytes: int = 1024 * 1024
 
     # Shared secret for POST /snaps/purge, so a scheduler can clean up expired
     # snaps. The endpoint is disabled while this is unset.

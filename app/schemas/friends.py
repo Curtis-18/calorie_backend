@@ -16,6 +16,7 @@ class PersonOut(BaseModel):
     friendship_id: uuid.UUID | None = None
     user_id: uuid.UUID
     username: str
+    avatar_url: str | None = None  # their profile picture, if they set one
     since: datetime
     # Friends only (when the app sends ?date=): the pair streak with them.
     streak: int | None = None
