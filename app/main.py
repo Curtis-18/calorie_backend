@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, text
@@ -12,12 +12,13 @@ from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.models.user import Profile
 from app.routers import (
-    foods, friends, insights, logs, notifications, photo_estimation, progress, snaps, targets, username, weights,
+    account, foods, friends, insights, logs, notifications, photo_estimation, progress, snaps, targets, username,
+    weights,
 )
 
 # Import every model before the app serves traffic so Base.metadata knows
 # about all tables and FK targets resolve.
-from app.models import food_log, friendship, insights_cache, notification, snap, target, user, weight_log  # noqa: F401
+from app.models import food_log, food_log_nutrients, friendship, insights_cache, notification, snap, target, user, weight_log  # noqa: F401
 
 log = logging.getLogger("calorie_backend")
 
@@ -35,7 +36,7 @@ def cors_kwargs(cors: Settings) -> dict:
         "allow_origins": cors.exact_origins,
         "allow_origin_regex": cors.cors_origin_regex,
         "allow_credentials": True,
-        "allow_methods": ["GET", "POST", "DELETE", "OPTIONS"],
+        "allow_methods": ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         "allow_headers": ["Authorization", "Content-Type"],
     }
 
@@ -59,6 +60,7 @@ app.include_router(username.router)
 app.include_router(friends.router)
 app.include_router(snaps.router)
 app.include_router(notifications.router)
+app.include_router(account.router)
 
 
 @app.get("/")
@@ -88,13 +90,17 @@ async def me(
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """Who am I. `username` is None until the user picks one (every existing
-    user, right after this ships), which is how the app knows to ask."""
-    username = None
+    """Who am I. `username` is None until the user picks one, which is how the
+    app knows to ask."""
     try:
         username = (
             await db.execute(select(Profile.username).where(Profile.id == user_id))
         ).scalar_one_or_none()
-    except Exception:  # noqa: BLE001 - the column may not exist until the migration is run
+    except Exception:  # noqa: BLE001
+        # This used to answer `username: null`, which the app reads as "this
+        # person has no username": one database hiccup sent someone who had a
+        # name to the pick-a-username screen, where their own name then showed
+        # as taken. A 503 tells the app it simply doesn't know.
         log.exception("could not read username")
+        raise HTTPException(status_code=503, detail="Couldn't load your account. Please try again.")
     return {"user_id": str(user_id), "username": username}

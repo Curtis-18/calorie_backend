@@ -19,3 +19,9 @@ class EstimatedFood(BaseModel):
     protein_g_per_100g: float | None = None
     carbs_g_per_100g: float | None = None
     fat_g_per_100g: float | None = None
+    # Extra nutrients per 100 g; None = USDA has no value for this food.
+    fiber_g_per_100g: float | None = None
+    sugar_g_per_100g: float | None = None
+    sodium_mg_per_100g: float | None = None
+    iron_mg_per_100g: float | None = None
+    calcium_mg_per_100g: float | None = None

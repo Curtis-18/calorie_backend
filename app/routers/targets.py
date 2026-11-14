@@ -13,9 +13,11 @@ from app.core.security import get_current_user_id
 from app.models.target import Target
 from app.models.weight_log import WeightLog
 from app.schemas.target import OnboardingIn, TargetOut
+from app.services.nutrients import nutrient_targets
 from app.services.target_calculator import (
     UnderageError,
     UnderweightLossError,
+    calculate_age,
     calculate_targets,
     compute_targets,
 )
@@ -99,6 +101,9 @@ async def upsert_target(
         "sex": data.sex,
         "activity_level": data.activity_level,
         "goal": data.goal,
+        "nutrient_targets": nutrient_targets(
+            data.sex, calculate_age(data.date_of_birth), computed["calorie_target"]
+        ),
     }
 
 @router.get("", response_model=TargetOut)
@@ -153,7 +158,11 @@ async def get_target(
                 log.exception("failed to persist recomputed targets")
 
     bmi = target.weight_kg / ((target.height_cm / 100) ** 2)
+    calorie_target = fresh["calorie_target"] if fresh else target.calorie_target
     return {
+        "nutrient_targets": nutrient_targets(
+            target.sex, calculate_age(target.date_of_birth), calorie_target
+        ),
         "date_of_birth": target.date_of_birth,
         "sex": target.sex,
         "activity_level": target.activity_level,

@@ -6,6 +6,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.food import FoodSearchResult
+from app.services.nutrients import NUTRIENTS
 
 log = logging.getLogger("calorie_backend")
 
@@ -54,6 +55,17 @@ def _pick(found: dict[tuple[str, str], float], sources: list[tuple[str, str | No
 def _extract_nutrients(food: dict) -> dict:
     found = _values_by_name(food)
     return {key: _pick(found, sources) for key, sources in _NUTRIENT_SOURCES.items()}
+
+
+def _extract_extras(food: dict) -> dict:
+    """Fibre, sugar, sodium, iron and calcium per 100 g, keyed as the API
+    sends them. The unit is checked, so a value USDA reports in an unexpected
+    unit is left unknown rather than read as 1000x off."""
+    found = _values_by_name(food)
+    return {
+        f"{n.key}_per_100g": _pick(found, [(name, n.unit) for name in n.usda_names])
+        for n in NUTRIENTS
+    }
 
 
 def _alcohol_g(food: dict) -> float:
@@ -126,6 +138,7 @@ async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult
                 protein_g_per_100g=nutrients["protein_g"],
                 carbs_g_per_100g=nutrients["carbs_g"],
                 fat_g_per_100g=nutrients["fat_g"],
+                **_extract_extras(food),
             )
         )
 
@@ -193,6 +206,10 @@ async def enrich_detected_foods(items: list[dict]) -> list[dict]:
             "protein_g_per_100g": match.protein_g_per_100g if match else None,
             "carbs_g_per_100g": match.carbs_g_per_100g if match else None,
             "fat_g_per_100g": match.fat_g_per_100g if match else None,
+            **{
+                f"{n.key}_per_100g": getattr(match, f"{n.key}_per_100g") if match else None
+                for n in NUTRIENTS
+            },
         }
 
     return list(await asyncio.gather(*(enrich(i) for i in items)))

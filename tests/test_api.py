@@ -95,11 +95,13 @@ def test_every_data_route_requires_auth(anon_client):
         ("get", "/foods/search?query=apple"),
         ("get", "/logs/today?date=2026-01-01"),
         ("delete", "/logs/some-id"),
+        ("patch", "/logs/some-id"),
+        ("delete", "/me"),
         ("post", "/logs"),
         ("post", "/estimate-photo"),
     ]:
         fn = getattr(client, method)
-        r = fn(path, json={}) if method == "post" else fn(path)
+        r = fn(path, json={}) if method in ("post", "patch") else fn(path)
         assert r.status_code == 401, f"{method.upper()} {path} returned {r.status_code}"
 
 
@@ -382,13 +384,13 @@ async def test_create_log_retry_of_own_entry_is_idempotent():
     from app.routers import logs
 
     owner = uuid.uuid4()
-    stored = SimpleNamespace(id="entry-1", user_id=owner)
+    stored = _StoredLog(owner)
     db = _LogDb(commit_error=_integrity_error(), stored=stored)
     response = Response()
 
     result = await logs.create_log(data=_log_payload(), response=response, user_id=owner, db=db)
 
-    assert result is stored
+    assert result["id"] == "entry-1" and result["calories"] == stored.calories
     assert response.status_code == 200
     assert db.rolled_back
 
@@ -478,6 +480,13 @@ def test_estimate_photo_sends_the_real_mime_type(client, monkeypatch):
     assert seen["mime"] == "image/png"
 
 
+# The extra-nutrient fields when USDA has no value for any of them.
+_NO_EXTRAS = {
+    "fiber_g_per_100g": None, "sugar_g_per_100g": None, "sodium_mg_per_100g": None,
+    "iron_mg_per_100g": None, "calcium_mg_per_100g": None,
+}
+
+
 def _usda_payload():
     return {
         "foods": [
@@ -537,6 +546,7 @@ def test_food_search_returns_mapped_results(client, monkeypatch):
                 "protein_g_per_100g": 0.26,
                 "carbs_g_per_100g": 13.8,
                 "fat_g_per_100g": 0.17,
+                **_NO_EXTRAS,
             }
         ],
     }
@@ -619,6 +629,8 @@ def test_get_targets_returns_onboarding_answers_for_profile_restore(client):
     )
     assert body["calorie_target"] == fresh["calorie_target"]
     assert body["protein_g"] == fresh["protein_g"]
+    assert body["nutrient_targets"]["iron_mg"] == 18  # a woman under 51
+    assert body["nutrient_targets"]["fiber_g"] == round(14 * fresh["calorie_target"] / 1000)
     assert row.calorie_target == fresh["calorie_target"]
     assert db.committed
 
@@ -644,6 +656,11 @@ def test_post_targets_echoes_onboarding_answers(client):
         "1995-03-14", "male", "moderate", "gain",
     )
     assert body["calorie_target"] > 0
+    # a man: iron 8 mg, calcium 1000 mg, sodium limit 2300 mg, fibre from calories
+    assert body["nutrient_targets"] == {
+        "fiber_g": round(14 * body["calorie_target"] / 1000),
+        "sodium_limit_mg": 2300, "iron_mg": 8, "calcium_mg": 1000,
+    }
 
 
 def _result(fdc_id, description, data_type, kcal=100.0):
@@ -702,7 +719,7 @@ async def test_enrich_detected_foods_fills_macros_and_survives_a_failed_lookup(m
         "name": "rice", "estimated_grams": 150.0, "matched": True,
         "matched_description": "Rice, white, cooked", "matched_fdc_id": 7,
         "calories_per_100g": 130.0, "protein_g_per_100g": 1.0,
-        "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0,
+        "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0, **_NO_EXTRAS,
     }
     assert out[1]["matched"] is False and out[1]["calories_per_100g"] is None
     assert out[2]["matched"] is False
@@ -728,7 +745,7 @@ def test_estimate_photo_returns_enriched_foods(client, monkeypatch):
         "name": "rice", "estimated_grams": 150.0, "matched": True,
         "matched_description": "Rice, white, cooked", "matched_fdc_id": 7,
         "calories_per_100g": 130.0, "protein_g_per_100g": 1.0,
-        "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0,
+        "carbs_g_per_100g": 2.0, "fat_g_per_100g": 3.0, **_NO_EXTRAS,
     }]
 
 
@@ -744,3 +761,95 @@ def test_post_targets_rejects_under_18(client):
     })
     assert r.status_code == 422
     assert "18" in r.json()["detail"]
+
+
+# --- PATCH /logs/{id}: correcting a saved entry ------------------------------
+
+class _StoredLog:
+    def __init__(self, owner):
+        from datetime import date, datetime
+
+        self.id, self.user_id = "entry-1", owner
+        self.name, self.calories = "Apple", 95
+        self.protein_g, self.carbs_g, self.fat_g = 0.5, 25.0, 0.3
+        self.meal_type, self.source = "snack", "manual"
+        self.timestamp, self.log_date = datetime(2026, 11, 2, 8, 0), date(2026, 11, 2)
+
+
+class _PatchDb:
+    def __init__(self, entry, commit_error=None):
+        self.entry, self.commit_error = entry, commit_error
+        self.committed = self.rolled_back = False
+
+    async def get(self, _model, _pk):
+        return self.entry
+
+    async def commit(self):
+        if self.commit_error:
+            raise self.commit_error
+        self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
+
+
+_ME = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
+def test_patch_log_changes_only_what_is_sent(client):
+    entry = _StoredLog(_ME)
+    db = _PatchDb(entry)
+    _with_db(db)
+    r = client.patch("/logs/entry-1", json={"calories": 190, "carbs_g": 50, "meal_type": "lunch"})
+    assert r.status_code == 200 and db.committed
+    body = r.json()
+    assert (body["calories"], body["carbs_g"], body["meal_type"]) == (190, 50, "lunch")
+    # untouched: the name, the other macros, and the fields that can never change
+    assert (body["name"], body["protein_g"], body["source"], body["log_date"]) == ("Apple", 0.5, "manual", "2026-11-02")
+
+
+def test_patch_log_treats_null_as_not_sent_and_trims_the_name(client):
+    entry = _StoredLog(_ME)
+    _with_db(_PatchDb(entry))
+    r = client.patch("/logs/entry-1", json={"name": "  Fuji apple ", "calories": None})
+    assert r.status_code == 200
+    assert (entry.name, entry.calories) == ("Fuji apple", 95)
+
+
+def test_patch_log_is_404_for_a_missing_or_someone_elses_entry(client):
+    _with_db(_PatchDb(None))
+    assert client.patch("/logs/entry-1", json={"calories": 1}).status_code == 404
+    other = _StoredLog(uuid.UUID("00000000-0000-0000-0000-000000000002"))
+    _with_db(_PatchDb(other))
+    assert client.patch("/logs/entry-1", json={"calories": 1}).status_code == 404
+    assert other.calories == 95
+
+
+def test_patch_log_rejects_bad_values(client):
+    entry = _StoredLog(_ME)
+    _with_db(_PatchDb(entry))
+    for bad in ({"calories": -1}, {"protein_g": -0.1}, {"meal_type": "brunch"}, {"name": "   "}, {"name": ""}):
+        assert client.patch("/logs/entry-1", json=bad).status_code == 422, bad
+    assert (entry.name, entry.calories, entry.meal_type) == ("Apple", 95, "snack")
+
+
+def test_patch_log_cannot_move_an_entry_or_change_its_owner(client):
+    entry = _StoredLog(_ME)
+    _with_db(_PatchDb(entry))
+    r = client.patch("/logs/entry-1", json={"id": "x", "user_id": str(uuid.uuid4()), "log_date": "2020-01-01", "source": "photo"})
+    assert r.status_code == 200
+    assert (entry.id, entry.user_id, str(entry.log_date), entry.source) == ("entry-1", _ME, "2026-11-02", "manual")
+
+
+def test_patch_log_db_failure_is_a_clean_500(client):
+    db = _PatchDb(_StoredLog(_ME), commit_error=RuntimeError("boom"))
+    _with_db(db)
+    r = client.patch("/logs/entry-1", json={"calories": 100})
+    assert r.status_code == 500 and db.rolled_back and r.json()["detail"] == "Could not save this change"
+
+
+def test_cors_allows_patch():
+    from app.core.config import settings
+    from app.main import cors_kwargs
+
+    assert "PATCH" in cors_kwargs(settings)["allow_methods"]

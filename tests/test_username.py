@@ -159,10 +159,14 @@ def test_me_returns_the_username(client):
     assert client.get("/me").json() == {"user_id": str(ME), "username": "sam"}
 
 
-def test_me_survives_a_missing_column(client):
+def test_me_says_it_does_not_know_when_the_database_fails(client):
+    """It used to answer `username: null`, which the app reads as "pick a
+    username": a database hiccup sent people who had one to the picker."""
+
     class Boom:
         async def execute(self, _):
-            raise RuntimeError('column "username" does not exist')
+            raise RuntimeError("connection reset")
 
     _with_db(Boom())
-    assert client.get("/me").json() == {"user_id": str(ME), "username": None}
+    r = client.get("/me")
+    assert r.status_code == 503 and "username" not in r.json()

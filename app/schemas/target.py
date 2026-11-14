@@ -32,3 +32,5 @@ class TargetOut(BaseModel):
     protein_g: int
     fat_g: int
     carbs_g: int
+    # Daily reference amounts for the extra nutrients (see services/nutrients.py).
+    nutrient_targets: dict[str, int] | None = None
