@@ -101,7 +101,6 @@ async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult
         return []
 
     params = {
-        "api_key": settings.usda_api_key,
         "query": query,
         "pageSize": page_size,
     }
@@ -110,6 +109,9 @@ async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult
         response = await client.get(
             f"{settings.usda_base_url}/foods/search",
             params=params,
+            # In a header, not `?api_key=`: raise_for_status() puts the full
+            # URL in its message, which the callers log, key included.
+            headers={"X-Api-Key": settings.usda_api_key},
         )
         if response.status_code >= 400:
             log.error("usda error %s: %s", response.status_code, response.text[:500])

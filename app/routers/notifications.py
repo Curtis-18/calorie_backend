@@ -162,7 +162,8 @@ async def streak_reminders(
     """
     if not settings.cron_secret:
         raise HTTPException(404, "Not found")
-    if not x_cron_secret or not secrets.compare_digest(x_cron_secret, settings.cron_secret):
+    # Bytes: compare_digest raises on a non-ASCII str, which was a 500.
+    if not x_cron_secret or not secrets.compare_digest(x_cron_secret.encode(), settings.cron_secret.encode()):
         raise HTTPException(403, "Forbidden")
 
     now = datetime.now(timezone.utc)
@@ -198,6 +199,9 @@ async def streak_reminders(
                     counted(await notify(db, uid, kind, dedupe_key=f"{prefix}:{day}", count=streak, now=now))
             except Exception:  # noqa: BLE001 - one person's failure must not stop the rest
                 log.exception("logging reminder failed for a user")
+                # A failed statement leaves the transaction aborted: without
+                # this, everyone after them failed as well.
+                await db.rollback()
 
         if wants_pair:
             try:
@@ -231,6 +235,7 @@ async def streak_reminders(
                 )
             except Exception:  # noqa: BLE001
                 log.exception("streak reminder failed for a user")
+                await db.rollback()
 
     await db.execute(delete(NotificationLog).where(NotificationLog.created_at < now - LOG_KEEP))
     await db.commit()

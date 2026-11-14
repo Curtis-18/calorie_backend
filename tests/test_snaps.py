@@ -294,3 +294,23 @@ def test_the_friends_list_still_loads_if_the_snaps_tables_are_missing(client):
     r = client.get("/friends", params={"date": resolve_today(None).isoformat()})
     assert r.status_code == 200
     assert r.json()["friends"][0]["streak"] is None
+
+
+def test_someone_no_longer_a_friend_cannot_react_but_can_still_report(client):
+    """A removed or blocked person kept reacting to an old bite, and every
+    reaction notified the person who had blocked them."""
+    sid = uuid.uuid4()
+    # The bite is addressed to me and live, but the friends list is empty.
+    db = _Db(_Result(SAM), _Result(rows=[]))
+    _with_db(db)
+    assert client.post(f"/snaps/{sid}/react", json={"emoji": "🔥"}).status_code == 404
+    assert not db.committed
+
+    db = _Db(_Result(SAM), _Result(rows=[]))
+    _with_db(db)
+    assert client.post(f"/snaps/{sid}/view").status_code == 404
+
+    db = _Db(_Result(SAM))
+    _with_db(db)
+    assert client.post(f"/snaps/{sid}/report", json={"reason": "spam"}).status_code == 204
+    assert db.committed and db.added[0].reported_user_id == SAM

@@ -5,6 +5,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWTError
+from jwt.exceptions import PyJWKClientConnectionError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +35,14 @@ async def verify_token(creds: HTTPAuthorizationCredentials = Depends(bearer_sche
         # event loop, otherwise the first request after a cold start stalls
         # every other in-flight request behind it.
         return await asyncio.to_thread(_decode, creds)
+    except PyJWKClientConnectionError as exc:
+        # We couldn't fetch Supabase's signing keys, so we can't tell whether
+        # the token is good. That is our outage, not a bad session: a 401 here
+        # made the app sign people out (it treats a repeated 401 as "session
+        # gone"), while a 503 makes it wait and retry.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Sign-in check is temporarily unavailable. Please try again."
+        ) from exc
     except PyJWTError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token") from exc
 

@@ -4,6 +4,7 @@ import uuid
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.rate_limit import food_searches
 from app.core.security import get_current_user_id
 from app.models.food import FoodSearchResponse
 from app.services.usda_service import search_foods
@@ -24,6 +25,7 @@ async def search(
     The client used to call USDA directly with the key compiled into the app,
     which shipped it in every web bundle and mobile build.
     """
+    food_searches.check("search", user_id, "You're searching very fast. Wait a moment and try again.")
     try:
         results = await search_foods(query, page_size=page_size)
     except (httpx.HTTPError, ValueError):

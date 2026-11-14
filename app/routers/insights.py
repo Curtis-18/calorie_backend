@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dates import resolve_today  # noqa: F401 - re-exported for tests
+from app.core.rate_limit import insight_generations
 from app.core.security import get_current_user_id
 from app.models.insights_cache import InsightsCache
 from app.schemas.insights import InsightsOut
@@ -69,6 +70,10 @@ async def get_insights(
         )
 
     try:
+        # Each generation is a paid Gemini call, and `refresh=true` forces one.
+        # Over the limit, fall through to the same degraded answer as an outage.
+        if not insight_generations.allow("insights", user_id):
+            raise RuntimeError("insights rate limit reached")
         payload = await generate_insights(db, user_id, trend, today)
     except Exception:  # noqa: BLE001 - the trend is still worth serving
         # Gemini being down (503 under load, or a timeout) must not take the

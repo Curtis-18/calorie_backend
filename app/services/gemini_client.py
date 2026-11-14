@@ -33,7 +33,10 @@ async def generate_content(payload: dict, timeout: float = 30.0) -> dict:
             try:
                 response = await client.post(
                     url,
-                    params={"key": settings.gemini_api_key},
+                    # In a header, not `?key=`: httpx puts the full URL in its
+                    # error messages, so a query-string key ended up in the
+                    # logs every time Gemini answered with an error.
+                    headers={"x-goog-api-key": settings.gemini_api_key},
                     json=payload,
                     timeout=timeout,
                 )

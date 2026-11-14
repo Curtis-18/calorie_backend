@@ -156,7 +156,10 @@ async def get_today_logs(
     return [_out(e, nutrients.get(e.id)) for e in entries]
 
 
-@router.patch("/{log_id}", response_model=FoodLogOut)
+# `:path` because the id is chosen by the app and older builds put the food
+# name in it: an id containing "/" matched no route, so that entry could never
+# be edited or deleted.
+@router.patch("/{log_id:path}", response_model=FoodLogOut)
 async def update_log(
     log_id: str,
     data: FoodLogUpdate,
@@ -193,7 +196,7 @@ async def update_log(
     return _out(entry, (await _load_nutrients(db, [log_id])).get(log_id))
 
 
-@router.delete("/{log_id}", status_code=204)
+@router.delete("/{log_id:path}", status_code=204)
 async def delete_log(
     log_id: str,
     user_id: uuid.UUID = Depends(get_current_user_id),
@@ -205,5 +208,10 @@ async def delete_log(
     if entry is None or entry.user_id != user_id:
         raise HTTPException(status_code=404, detail="Log not found")
     await db.delete(entry)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        log.exception("food log delete failed")
+        raise HTTPException(status_code=500, detail="Could not delete this entry")
     return None

@@ -277,8 +277,16 @@ async def sent(
     ]
 
 
-async def _received_from(db: AsyncSession, snap_id: uuid.UUID, me: uuid.UUID) -> uuid.UUID:
-    """The sender of a live snap addressed to [me], or 404."""
+async def _received_from(
+    db: AsyncSession, snap_id: uuid.UUID, me: uuid.UUID, *, friends_only: bool = True
+) -> uuid.UUID:
+    """The sender of a live snap addressed to [me], or 404.
+
+    [friends_only]: the two must still be friends, as the inbox requires.
+    Without it, someone who had been removed or blocked could keep reacting
+    to an old bite, and each reaction notified the person who blocked them.
+    Reporting stays possible afterwards (people often block first).
+    """
     sender = (
         await db.execute(
             select(Snap.sender_id)
@@ -286,7 +294,7 @@ async def _received_from(db: AsyncSession, snap_id: uuid.UUID, me: uuid.UUID) ->
             .where(Snap.id == snap_id, SnapRecipient.recipient_id == me, Snap.expires_at > _now())
         )
     ).scalar_one_or_none()
-    if sender is None:
+    if sender is None or (friends_only and sender not in await _friend_ids(db, me)):
         raise HTTPException(404, "That bite has disappeared.")
     return sender
 
@@ -340,7 +348,7 @@ async def report(
     db: AsyncSession = Depends(get_db),
 ):
     """Report a snap you received. The team reviews reports in the database."""
-    sender = await _received_from(db, snap_id, user_id)
+    sender = await _received_from(db, snap_id, user_id, friends_only=False)
     db.add(SnapReport(
         reporter_id=user_id, reported_user_id=sender, snap_id=snap_id,
         reason=(data.reason or "").strip() or None,
@@ -376,7 +384,8 @@ async def purge(x_cron_secret: str | None = Header(default=None)):
     """For a scheduler: delete every expired snap. Disabled until CRON_SECRET is set."""
     if not settings.cron_secret:
         raise HTTPException(404, "Not found")
-    if not x_cron_secret or not secrets.compare_digest(x_cron_secret, settings.cron_secret):
+    # Bytes: compare_digest raises on a non-ASCII str, which was a 500.
+    if not x_cron_secret or not secrets.compare_digest(x_cron_secret.encode(), settings.cron_secret.encode()):
         raise HTTPException(403, "Forbidden")
     _require_storage()
     from app.routers.stories import purge_expired_stories

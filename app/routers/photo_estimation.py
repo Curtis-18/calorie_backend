@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.core.rate_limit import photo_scans
 from app.core.security import get_current_user_id
 from app.models.photo import EstimatedFood
 from app.services.gemini_service import identify_foods
@@ -62,6 +63,7 @@ async def estimate_photo(
     if len(image_bytes) > settings.max_photo_bytes:
         raise HTTPException(status_code=413, detail="Image too large")
 
+    photo_scans.check("photo", user_id, "You've scanned a lot of photos. Try again in a little while.")
     try:
         detected = await identify_foods(image_bytes, mime_type=sniff_image_mime(image_bytes))
     except Exception as exc:  # noqa: BLE001

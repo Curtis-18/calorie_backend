@@ -94,10 +94,13 @@ async def sync_targets_to_weight(
     except UnderweightLossError:
         # They've reached the bottom of the healthy range: stop the deficit.
         goal = "maintain"
-        fresh = compute_targets(
-            date_of_birth=target.date_of_birth, sex=target.sex, height_cm=target.height_cm,
-            weight_kg=weight_kg, activity_level=target.activity_level, goal=goal,
-        )
+        try:
+            fresh = compute_targets(
+                date_of_birth=target.date_of_birth, sex=target.sex, height_cm=target.height_cm,
+                weight_kg=weight_kg, activity_level=target.activity_level, goal=goal,
+            )
+        except UnderageError:
+            return False, None
         notice = (
             "You've reached the lower end of the healthy weight range for your height, "
             "so we've switched your goal to Maintain."

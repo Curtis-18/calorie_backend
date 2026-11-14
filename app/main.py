@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.body_limit import BodyLimitMiddleware
 from app.core.config import Settings, settings
 from app.core.database import get_db
 from app.core.security import get_current_user_id
@@ -48,6 +49,9 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
+# The largest legitimate body is a base64 photo for /estimate-photo. Added
+# before CORS so CORS stays outermost and a 413 still carries its headers.
+app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_photo_bytes * 4 // 3 + 64 * 1024)
 app.add_middleware(CORSMiddleware, **cors_kwargs(settings))
 
 app.include_router(foods.router)
