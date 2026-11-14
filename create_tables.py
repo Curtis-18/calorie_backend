@@ -5,6 +5,7 @@ from app.models.target import Target
 from app.models.food_log import FoodLog
 from app.models.insights_cache import InsightsCache
 from app.models.weight_log import WeightLog
+from app.models.message import Message  # noqa: F401
 
 print(sorted(Base.metadata.tables.keys()))  # add this line
 

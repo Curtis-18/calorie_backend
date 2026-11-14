@@ -52,7 +52,7 @@ class ContentReport(Base):
     id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     reporter_id = Column(PGUUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False)
     reported_user_id = Column(PGUUID(as_uuid=True), nullable=False)
-    kind = Column(String, nullable=False)  # 'story' | 'avatar'
+    kind = Column(String, nullable=False)  # 'story' | 'avatar' | 'message'
     subject_id = Column(PGUUID(as_uuid=True), nullable=True)
     reason = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
