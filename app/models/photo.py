@@ -10,6 +10,14 @@ class EstimatedFood(BaseModel):
 
     name: str
     estimated_grams: float
+    # What Gemini could see of how it was made and what it is, so the app
+    # offers only the extras that make sense (oil on a fried food, not on fruit).
+    preparation: str | None = None
+    kind: str | None = None
+    # From the person's spoken note: extras they said went in ("butter"), and
+    # why an amount changed ("halved because you said half").
+    added: list[str] | None = None
+    note_applied: str | None = None
     matched: bool = False
     # What the name was matched to, so the app can show it and let the user
     # correct a wrong match. Both None when unmatched.

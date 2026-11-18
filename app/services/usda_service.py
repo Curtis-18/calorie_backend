@@ -95,6 +95,31 @@ def is_plausible(nutrients: dict, alcohol_g: float = 0.0) -> bool:
     return 0.35 <= calories / expected <= 1.6
 
 
+def _result_from_food(food: dict) -> FoodSearchResult | None:
+    """One USDA search hit as our result, or None when it can't be used."""
+    fdc_id = food.get("fdcId")
+    description = food.get("description")
+    if fdc_id is None or not description:
+        return None
+    nutrients = _extract_nutrients(food)
+    if food.get("dataType") == "Branded" and not is_plausible(nutrients, _alcohol_g(food)):
+        log.info("skipping implausible branded food %s: %s", fdc_id, nutrients)
+        return None
+    # _extract_nutrients keys (calories, protein_g...) differ from the
+    # model's field names. Splatting them in directly failed validation on
+    # every result, so this endpoint 500'd for any non-empty search.
+    return FoodSearchResult(
+        fdc_id=fdc_id,
+        description=description,
+        data_type=food.get("dataType"),
+        calories_per_100g=nutrients["calories"],
+        protein_g_per_100g=nutrients["protein_g"],
+        carbs_g_per_100g=nutrients["carbs_g"],
+        fat_g_per_100g=nutrients["fat_g"],
+        **_extract_extras(food),
+    )
+
+
 async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult]:
     query = query.strip()
     if not query:
@@ -120,31 +145,70 @@ async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult
 
     results = []
     for food in data.get("foods") or []:
-        fdc_id = food.get("fdcId")
-        description = food.get("description")
-        if fdc_id is None or not description:
-            continue
-        nutrients = _extract_nutrients(food)
-        if food.get("dataType") == "Branded" and not is_plausible(nutrients, _alcohol_g(food)):
-            log.info("skipping implausible branded food %s: %s", fdc_id, nutrients)
-            continue
-        # _extract_nutrients keys (calories, protein_g...) differ from the
-        # model's field names. Splatting them in directly failed validation on
-        # every result, so this endpoint 500'd for any non-empty search.
-        results.append(
-            FoodSearchResult(
-                fdc_id=fdc_id,
-                description=description,
-                data_type=food.get("dataType"),
-                calories_per_100g=nutrients["calories"],
-                protein_g_per_100g=nutrients["protein_g"],
-                carbs_g_per_100g=nutrients["carbs_g"],
-                fat_g_per_100g=nutrients["fat_g"],
-                **_extract_extras(food),
-            )
-        )
+        result = _result_from_food(food)
+        if result is not None:
+            results.append(result)
 
     return results
+
+
+def normalize_barcode(code: str) -> str | None:
+    """Digits only, 8 to 14 long (EAN-8, UPC-A, EAN-13, GTIN-14), else None."""
+    code = code.strip()
+    if not code.isascii() or not code.isdigit() or not 8 <= len(code) <= 14:
+        return None
+    return code
+
+
+def _same_barcode(a: str, b: str) -> bool:
+    # A UPC-A is an EAN-13 with a leading zero, and USDA stores either form.
+    return a.lstrip("0") == b.lstrip("0")
+
+
+def barcode_forms(code: str) -> list[str]:
+    """The spellings USDA might have stored for one barcode.
+
+    Checked live: USDA matches the stored digits exactly, and stores some
+    products zero-padded to 14 digits ("00016000275287") and others as printed,
+    so a scanned 12-digit UPC finds nothing unless it is padded the same way.
+    """
+    forms = [code]
+    for width in (12, 13, 14):
+        padded = code.lstrip("0").zfill(width)
+        if len(padded) == width and padded not in forms:
+            forms.append(padded)
+    return forms
+
+
+async def lookup_barcode(code: str) -> FoodSearchResult | None:
+    """The branded USDA food with this exact barcode, or None.
+
+    USDA indexes the barcode (`gtinUpc`) for text search, but a search for
+    digits can also hit other fields, so only an entry whose own barcode
+    equals the scanned one is returned.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+
+        async def search(form: str) -> list[dict]:
+            response = await client.get(
+                f"{settings.usda_base_url}/foods/search",
+                params={"query": form, "dataType": "Branded", "pageSize": 25},
+                headers={"X-Api-Key": settings.usda_api_key},
+            )
+            if response.status_code >= 400:
+                log.error("usda error %s: %s", response.status_code, response.text[:500])
+            response.raise_for_status()
+            return response.json().get("foods") or []
+
+        batches = await asyncio.gather(*(search(form) for form in barcode_forms(code)))
+
+    for foods in batches:
+        for food in foods:
+            if _same_barcode(str(food.get("gtinUpc") or ""), code):
+                result = _result_from_food(food)
+                if result is not None:
+                    return result
+    return None
 
 
 # Ranking for picking one USDA entry to stand for a detected food. Ported

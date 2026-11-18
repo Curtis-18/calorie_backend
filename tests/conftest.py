@@ -39,3 +39,43 @@ def anon_client():
 
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
+
+
+class _Ctx:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class FakeUsageSession:
+    """Stands in for a database session in record_usage: remembers what it ran."""
+
+    def __init__(self, fail=False):
+        self.statements = []
+        self.fail = fail
+
+    def begin(self):
+        return _Ctx()
+
+    def begin_nested(self):
+        return _Ctx()
+
+    async def execute(self, stmt):
+        if self.fail:
+            raise RuntimeError("relation ai_usage does not exist")
+        self.statements.append(stmt)
+
+
+@pytest.fixture(autouse=True)
+def usage_db(monkeypatch):
+    """No test reaches a real database through the usage counter."""
+    from app.core import features
+
+    session = FakeUsageSession()
+    monkeypatch.setattr(features, "_new_session", lambda: _Ctx(session))
+    return session
