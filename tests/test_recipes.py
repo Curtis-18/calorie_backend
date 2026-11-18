@@ -66,6 +66,9 @@ class _Scalars:
     def __init__(self, rows):
         self.rows = rows
 
+    def scalar_one_or_none(self):
+        return self.rows[0] if self.rows else None
+
     def scalars(self):
         return self
 
@@ -109,6 +112,7 @@ class MemDb:
             elif isinstance(o, FoodLog):
                 self.logs[o.id] = o
             elif isinstance(o, RecipeEvent):
+                o.id = o.id or uuid.uuid4()
                 self.events.append(o)
         self._pending = []
 
@@ -124,6 +128,9 @@ class MemDb:
 
     async def execute(self, stmt):
         text = str(stmt)
+        if "recipe_events" in text:
+            wanted = set(stmt.compile().params.values())
+            return _Scalars([e.id for e in self.events if e.log_entry_id in wanted])
         if "recipe_ingredients" in text:
             return _Scalars(sorted(self.ingredients, key=lambda i: i.position))
         return _Scalars(sorted(self.recipes.values(), key=lambda r: r.created_at or 0))
@@ -305,6 +312,20 @@ def test_logging_twice_with_the_same_id_is_one_entry(client, db, monkeypatch):
     assert client.post(f"/recipes/{RID}/log", json=payload).status_code == 201
     assert client.post(f"/recipes/{RID}/log", json=payload).status_code == 200
     assert len(db.logs) == 1 and len(db.events) == 1
+
+
+def test_an_entry_the_app_saved_first_still_gets_its_event_once(client, db, monkeypatch):
+    usda(monkeypatch, {1: RICE, 2: CHICKEN})
+    client.post("/recipes", json=body())
+    # The app's own save path created the entry before it reported the recipe.
+    db.logs["entry-9"] = SimpleNamespace(
+        id="entry-9", user_id=ME, name="Chicken rice", calories=400, protein_g=1.0, carbs_g=1.0, fat_g=1.0,
+        meal_type="dinner", source="manual", timestamp=datetime(2026, 11, 18, 19), log_date=date(2026, 11, 18),
+    )
+    payload = {"id": "entry-9", "meal_type": "dinner", "log_date": "2026-11-18", "timestamp": "2026-11-18T19:00:00"}
+    assert client.post(f"/recipes/{RID}/log", json=payload).status_code == 200
+    assert client.post(f"/recipes/{RID}/log", json=payload).status_code == 200
+    assert [(e.kind, e.log_entry_id) for e in db.events] == [("log", "entry-9")]
 
 
 def test_another_persons_entry_id_is_a_conflict(client, db, monkeypatch):

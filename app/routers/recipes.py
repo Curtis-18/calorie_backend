@@ -125,6 +125,23 @@ async def _record_event(db: AsyncSession, recipe_id, actor_id, kind: str, log_en
         log.warning("recipe event not recorded", exc_info=True)
 
 
+async def _has_log_event(db: AsyncSession, recipe_id, log_entry_id: str) -> bool:
+    try:
+        async with db.begin_nested():
+            found = (
+                await db.execute(
+                    select(RecipeEvent.id).where(
+                        RecipeEvent.recipe_id == recipe_id,
+                        RecipeEvent.kind == "log",
+                        RecipeEvent.log_entry_id == log_entry_id,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+        return found is not None
+    except Exception:  # noqa: BLE001
+        return True  # can't tell: don't risk counting it twice
+
+
 async def _mine(db: AsyncSession, user_id, recipe_id: uuid.UUID) -> Recipe:
     recipe = await db.get(Recipe, recipe_id)
     # Someone else's recipe is "not found", the same as one that doesn't exist.
@@ -304,6 +321,16 @@ async def log_recipe(
         if existing.user_id != user_id:
             raise HTTPException(status_code=409, detail="Log with this id already exists")
         response.status_code = 200
+        # The app saves the entry through its normal offline-safe path first and
+        # reports the recipe afterwards, so the entry may already be here. The
+        # event is still recorded, once.
+        if not await _has_log_event(db, recipe.id, data.id):
+            await _record_event(db, recipe.id, user_id, "log", data.id)
+            try:
+                await db.commit()
+            except Exception:  # noqa: BLE001
+                await db.rollback()
+                log.warning("recipe event not saved", exc_info=True)
         return _log_out(existing, None)
 
     amounts = scale(
