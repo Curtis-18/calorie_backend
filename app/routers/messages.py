@@ -19,7 +19,7 @@ from app.core.database import get_db
 from app.core.rate_limit import messages_sent
 from app.core.security import get_current_user_id
 from app.models.friendship import Friendship
-from app.models.message import Message
+from app.models.message import Message, MessageAttachment
 from app.models.story import ContentReport
 from app.models.user import Profile
 from app.schemas.messages import ConversationOut, ConversationsOut, MessageIn, MessageOut, ThreadOut
@@ -45,9 +45,32 @@ def _pair(me: uuid.UUID, other: uuid.UUID):
     )
 
 
-def _out(m: Message, me: uuid.UUID) -> MessageOut:
+def _out(m: Message, me: uuid.UUID, attachment: dict | None = None) -> MessageOut:
     mine = m.sender_id == me
-    return MessageOut(id=m.id, mine=mine, body=m.body, created_at=m.created_at, read_at=m.read_at if mine else None)
+    return MessageOut(
+        id=m.id, mine=mine, body=m.body, created_at=m.created_at, read_at=m.read_at if mine else None,
+        attachment=attachment,
+    )
+
+
+async def load_attachments(db: AsyncSession, message_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
+    """Cards attached to these messages. In a savepoint and forgiving: if the
+    table isn't there yet, chat just shows the plain text."""
+    if not message_ids:
+        return {}
+    try:
+        async with db.begin_nested():
+            rows = (
+                await db.execute(
+                    select(MessageAttachment.message_id, MessageAttachment.attachment).where(
+                        MessageAttachment.message_id.in_(message_ids)
+                    )
+                )
+            ).all()
+        return {mid: att for mid, att in rows if att}
+    except Exception:  # noqa: BLE001
+        log.warning("could not read message attachments", exc_info=True)
+        return {}
 
 
 async def _friend_ids(db: AsyncSession, me: uuid.UUID) -> set[uuid.UUID]:
@@ -144,7 +167,8 @@ async def thread(
     ).scalars().all()
     more = len(rows) > limit
     rows = list(reversed(rows[:limit]))
-    return ThreadOut(messages=[_out(m, user_id) for m in rows], has_more=more)
+    attachments = await load_attachments(db, [m.id for m in rows])
+    return ThreadOut(messages=[_out(m, user_id, attachments.get(m.id)) for m in rows], has_more=more)
 
 
 @router.post("/with/{friend_id}", response_model=MessageOut)

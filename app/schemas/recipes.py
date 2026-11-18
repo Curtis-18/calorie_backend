@@ -104,3 +104,35 @@ class RecipeLogIn(BaseModel):
     @classmethod
     def _naive(cls, v: datetime) -> datetime:
         return v.astimezone(timezone.utc).replace(tzinfo=None) if v.tzinfo else v
+
+
+class ShareIn(BaseModel):
+    id: uuid.UUID  # the chat message's id, chosen by the app so a retry sends it once
+
+
+class CollectionIn(BaseModel):
+    id: uuid.UUID
+    name: str = Field(min_length=1, max_length=40)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Give the collection a name.")
+        return v
+
+
+class CollectionItemIn(BaseModel):
+    recipe_id: uuid.UUID
+
+
+class HighlightsIn(BaseModel):
+    recipe_ids: list[uuid.UUID] = Field(max_length=6)
+
+    @field_validator("recipe_ids")
+    @classmethod
+    def _unique(cls, v: list[uuid.UUID]) -> list[uuid.UUID]:
+        if len(set(v)) != len(v):
+            raise ValueError("A recipe can only be pinned once.")
+        return v

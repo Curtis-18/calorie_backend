@@ -67,3 +67,45 @@ class RecipeEvent(Base):
     kind = Column(String, nullable=False)  # save | log | share | cook
     log_entry_id = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class Collection(Base):
+    """A folder of recipes ("Meal prep", "Weeknights"). Each person also has one
+    default "Saved" collection, made the first time they save something."""
+
+    __tablename__ = "collections"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True)  # chosen by the app
+    owner_id = Column(PGUUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    is_default = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class CollectionItem(Base):
+    __tablename__ = "collection_items"
+
+    collection_id = Column(PGUUID(as_uuid=True), ForeignKey("collections.id", ondelete="CASCADE"), primary_key=True)
+    recipe_id = Column(PGUUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), primary_key=True)
+    added_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class RecipePin(Base):
+    """The recipes a person has pinned as their Highlights (at most six)."""
+
+    __tablename__ = "recipe_pins"
+
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True)
+    recipe_id = Column(PGUUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), primary_key=True)
+    position = Column(SmallInteger, nullable=False)
+
+
+class RecipeShare(Base):
+    """One friend is allowed to open one of my private recipes. Removing the row
+    takes the access back."""
+
+    __tablename__ = "recipe_shares"
+
+    recipe_id = Column(PGUUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), primary_key=True)
+    friend_id = Column(PGUUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

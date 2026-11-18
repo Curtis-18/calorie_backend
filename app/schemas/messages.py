@@ -29,6 +29,9 @@ class MessageOut(BaseModel):
     # For messages I sent: when they opened the conversation ("Seen"). Always
     # null for messages sent to me.
     read_at: datetime | None = None
+    # A card shown under the text, e.g. {"kind": "recipe", "id": ..., "title": ..., "calories": ...}.
+    # Older apps ignore it and show the text.
+    attachment: dict | None = None
 
 
 class ThreadOut(BaseModel):

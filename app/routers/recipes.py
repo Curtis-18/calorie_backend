@@ -3,15 +3,21 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.models.food_log import FoodLog
-from app.models.recipe import Recipe, RecipeEvent, RecipeIngredient
+from app.models.message import Message, MessageAttachment
+from app.models.recipe import Collection, CollectionItem, Recipe, RecipeEvent, RecipeIngredient, RecipeShare
+from app.models.user import Profile
+from app.core.rate_limit import messages_sent
 from app.routers.logs import _out as _log_out, _write_nutrients
-from app.schemas.recipes import RecipeIn, RecipeLogIn, RecipeUpdate
+from app.routers.messages import _friend_ids, _out as _message_out, _require_friend
+from app.schemas.messages import MessageOut
+from app.schemas.recipes import RecipeIn, RecipeLogIn, RecipeUpdate, ShareIn
 from app.services import usda_service
 from app.services.nutrients import NUTRIENT_KEYS
 from app.services.recipe_nutrition import Ingredient, PerServing, compute_per_serving, scale
@@ -39,9 +45,11 @@ def _ingredient_out(i: RecipeIngredient) -> dict:
     }
 
 
-def _out(r: Recipe, ingredients: list[RecipeIngredient] | None = None) -> dict:
+def _out(r: Recipe, ingredients: list[RecipeIngredient] | None = None, mine: bool = True, owner_name: str | None = None) -> dict:
     out = {
         "id": str(r.id),
+        "mine": mine,
+        "owner_name": owner_name,
         "title": r.title,
         "description": r.description,
         "servings": float(r.servings),
@@ -150,6 +158,32 @@ async def _mine(db: AsyncSession, user_id, recipe_id: uuid.UUID) -> Recipe:
     return recipe
 
 
+async def readable(db: AsyncSession, user_id, recipe_id: uuid.UUID) -> Recipe:
+    """A recipe I may open: my own, or one a friend shared with me (and only
+    while we are still friends). Anything else is "not found"."""
+    recipe = await db.get(Recipe, recipe_id)
+    if recipe is None or recipe.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    if recipe.owner_id == user_id:
+        return recipe
+    try:
+        async with db.begin_nested():
+            shared = (
+                await db.execute(
+                    select(RecipeShare.recipe_id).where(RecipeShare.recipe_id == recipe_id, RecipeShare.friend_id == user_id)
+                )
+            ).first()
+    except Exception:  # noqa: BLE001
+        shared = None
+    if shared is None or recipe.owner_id not in await _friend_ids(db, user_id):
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    return recipe
+
+
+async def _owner_name(db: AsyncSession, owner_id) -> str | None:
+    return (await db.execute(select(Profile.username).where(Profile.id == owner_id))).scalar_one_or_none()
+
+
 async def _ingredients_of(db: AsyncSession, recipe_id) -> list[RecipeIngredient]:
     return list(
         (await db.execute(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe_id).order_by(RecipeIngredient.position)))
@@ -238,8 +272,12 @@ async def list_recipes(user_id: uuid.UUID = Depends(get_current_user_id), db: As
 
 @router.get("/{recipe_id}")
 async def get_recipe(recipe_id: uuid.UUID, user_id: uuid.UUID = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
-    recipe = await _mine(db, user_id, recipe_id)
-    return _out(recipe, await _ingredients_of(db, recipe.id))
+    recipe = await readable(db, user_id, recipe_id)
+    mine = recipe.owner_id == user_id
+    return _out(
+        recipe, await _ingredients_of(db, recipe.id), mine=mine,
+        owner_name=None if mine else await _owner_name(db, recipe.owner_id),
+    )
 
 
 @router.patch("/{recipe_id}")
@@ -315,7 +353,7 @@ async def log_recipe(
     Saved with source "manual": the app reads `source` as one of its two known
     values, and a new one would break loading the day in every installed build.
     """
-    recipe = await _mine(db, user_id, recipe_id)
+    recipe = await readable(db, user_id, recipe_id)
     existing = await db.get(FoodLog, data.id)
     if existing is not None:
         if existing.user_id != user_id:
@@ -363,3 +401,89 @@ async def log_recipe(
         log.warning("recipe log extras not saved", exc_info=True)
         nutrients = None
     return _log_out(entry, nutrients)
+
+
+@router.post("/{recipe_id}/save", status_code=204)
+async def save_recipe(recipe_id: uuid.UUID, user_id: uuid.UUID = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+    """Keep a recipe (mine, or one a friend shared) in my "Saved" collection."""
+    recipe = await readable(db, user_id, recipe_id)
+    try:
+        async with db.begin_nested():
+            saved = (
+                await db.execute(select(Collection).where(Collection.owner_id == user_id, Collection.is_default.is_(True)))
+            ).scalars().first()
+            if saved is None:
+                saved = Collection(id=uuid.uuid4(), owner_id=user_id, name="Saved", is_default=True)
+                db.add(saved)
+                await db.flush()
+            await db.execute(
+                pg_insert(CollectionItem).values(collection_id=saved.id, recipe_id=recipe.id).on_conflict_do_nothing()
+            )
+        await _record_event(db, recipe.id, user_id, "save")
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+        log.exception("recipe not saved to collection")
+        raise _unavailable()
+    return Response(status_code=204)
+
+
+@router.post("/{recipe_id}/share/{friend_id}", response_model=MessageOut)
+async def share_recipe(
+    recipe_id: uuid.UUID,
+    friend_id: uuid.UUID,
+    data: ShareIn,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send one of my recipes to a friend as a chat card. It stays private: this
+    one friend gets read access, which `DELETE` on the same path takes back.
+    Repeating the request (same id) returns the first message."""
+    recipe = await _mine(db, user_id, recipe_id)
+    existing = await db.get(Message, data.id)
+    if existing is not None:
+        if existing.sender_id != user_id or existing.recipient_id != friend_id:
+            raise HTTPException(status_code=409, detail="That message id is already used.")
+        return _message_out(existing, user_id, None)
+
+    await _require_friend(db, user_id, friend_id)
+    messages_sent.check("message", user_id, "You're sending messages very fast. Try again in a moment.")
+
+    card = {"kind": "recipe", "id": str(recipe.id), "title": recipe.title, "calories": recipe.calories_per_serving}
+    message = Message(
+        id=data.id, sender_id=user_id, recipient_id=friend_id,
+        # What an app without recipe cards (or without the table) shows.
+        body=f"Sent you a recipe: {recipe.title} ({recipe.calories_per_serving} kcal per serving)"[:1000],
+        created_at=datetime.now(timezone.utc),
+    )
+    try:
+        db.add(message)
+        await db.flush()  # the attachment row refers to the message
+        await db.execute(pg_insert(RecipeShare).values(recipe_id=recipe.id, friend_id=friend_id).on_conflict_do_nothing())
+        await db.execute(pg_insert(MessageAttachment).values(message_id=data.id, attachment=card).on_conflict_do_nothing())
+        await _record_event(db, recipe.id, user_id, "share")
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+        log.exception("recipe not shared")
+        raise _unavailable()
+    return _message_out(message, user_id, card)
+
+
+@router.delete("/{recipe_id}/share/{friend_id}", status_code=204)
+async def unshare_recipe(
+    recipe_id: uuid.UUID,
+    friend_id: uuid.UUID,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Take back a friend's access. The card stays in the chat but no longer opens."""
+    recipe = await _mine(db, user_id, recipe_id)
+    try:
+        await db.execute(delete(RecipeShare).where(RecipeShare.recipe_id == recipe.id, RecipeShare.friend_id == friend_id))
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+        log.exception("recipe unshare failed")
+        raise _unavailable()
+    return Response(status_code=204)

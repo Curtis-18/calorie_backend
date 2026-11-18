@@ -1,5 +1,5 @@
 from sqlalchemy import Column, DateTime, ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.sql import func
 
 from app.core.database import Base
@@ -17,3 +17,13 @@ class Message(Base):
     body = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     read_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class MessageAttachment(Base):
+    """Something attached to a message (a recipe card). Its own table, read in a
+    savepoint, so a missing migration only means chat shows the plain text."""
+
+    __tablename__ = "message_attachments"
+
+    message_id = Column(PGUUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True)
+    attachment = Column(JSONB, nullable=False)
