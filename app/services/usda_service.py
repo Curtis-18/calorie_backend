@@ -152,6 +152,32 @@ async def search_foods(query: str, page_size: int = 10) -> list[FoodSearchResult
     return results
 
 
+async def get_foods_by_ids(fdc_ids: list[int]) -> dict[int, FoodSearchResult]:
+    """USDA foods by id, in one request, keyed by id. An id USDA doesn't know,
+    or whose values can't be used, is simply missing from the answer. The
+    abridged format carries nutrients in the same shape as search results, so
+    the same reader is used."""
+    ids = sorted(set(fdc_ids))
+    if not ids:
+        return {}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(
+            f"{settings.usda_base_url}/foods",
+            params={"fdcIds": ",".join(str(i) for i in ids), "format": "abridged"},
+            headers={"X-Api-Key": settings.usda_api_key},
+        )
+        if response.status_code >= 400:
+            log.error("usda error %s: %s", response.status_code, response.text[:500])
+        response.raise_for_status()
+        foods = response.json()
+    out: dict[int, FoodSearchResult] = {}
+    for food in foods if isinstance(foods, list) else []:
+        result = _result_from_food(food)
+        if result is not None:
+            out[result.fdc_id] = result
+    return out
+
+
 def normalize_barcode(code: str) -> str | None:
     """Digits only, 8 to 14 long (EAN-8, UPC-A, EAN-13, GTIN-14), else None."""
     code = code.strip()

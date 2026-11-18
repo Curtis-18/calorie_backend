@@ -14,13 +14,13 @@ from app.core.security import get_current_user_id
 from app.models.user import Profile
 from app.services import avatars
 from app.routers import (
-    account, adjustments, avatar, budget, foods, friends, insights, logs, messages, notifications, photo_estimation, progress, snaps, stories, targets, username,
+    account, adjustments, avatar, budget, foods, friends, insights, logs, messages, notifications, photo_estimation, progress, recipes, reports, snaps, stories, targets, username,
     weights,
 )
 
 # Import every model before the app serves traffic so Base.metadata knows
 # about all tables and FK targets resolve.
-from app.models import ai_usage, budget_prefs, food_log, food_log_nutrients, friendship, insights_cache, message, notification, snap, story, target, user, weight_log  # noqa: F401
+from app.models import ai_usage, budget_prefs, food_log, food_log_nutrients, friendship, insights_cache, message, notification, recipe, snap, story, target, user, weight_log  # noqa: F401
 
 log = logging.getLogger("calorie_backend")
 
@@ -57,6 +57,8 @@ app.add_middleware(CORSMiddleware, **cors_kwargs(settings))
 app.include_router(foods.router)
 app.include_router(adjustments.router)
 app.include_router(budget.router)
+app.include_router(reports.router)
+app.include_router(recipes.router)
 app.include_router(logs.router)
 app.include_router(targets.router)
 app.include_router(insights.router)
