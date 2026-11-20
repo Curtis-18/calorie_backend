@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     max_snap_bytes: int = 2 * 1024 * 1024
     # Profile pictures arrive already shrunk to 512 px by the app.
     max_avatar_bytes: int = 1024 * 1024
+    # Recipe photos (cover and slides) the app has already shrunk; re-encoded on the server.
+    max_recipe_photo_bytes: int = 5 * 1024 * 1024
 
     # Shared secret for POST /snaps/purge, so a scheduler can clean up expired
     # snaps. The endpoint is disabled while this is unset.

@@ -83,7 +83,8 @@ class RecipeIn(BaseModel):
 
 
 class RecipeUpdate(BaseModel):
-    """Details only. To change the ingredients, save a new recipe."""
+    """Details, who can open it, and (optionally) a whole new ingredient list,
+    which is re-priced on the server."""
 
     title: str | None = Field(None, min_length=1, max_length=120)
     description: str | None = Field(None, max_length=1000)
@@ -91,6 +92,18 @@ class RecipeUpdate(BaseModel):
     region: str | None = Field(None, max_length=60)
     tags: list[str] | None = Field(None, max_length=10)
     steps: list[str] | None = Field(None, max_length=MAX_STEPS)
+    visibility: Literal["private", "friends"] | None = None
+    ingredients: list[IngredientIn] | None = Field(None, min_length=1, max_length=MAX_INGREDIENTS)
+
+
+class MediaIn(BaseModel):
+    image: str = Field(min_length=1)  # base64
+    caption: str | None = Field(None, max_length=120)
+
+    @field_validator("caption")
+    @classmethod
+    def _caption(cls, v: str | None) -> str | None:
+        return (v or "").strip() or None
 
 
 class RecipeLogIn(BaseModel):

@@ -109,3 +109,15 @@ class RecipeShare(Base):
     recipe_id = Column(PGUUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), primary_key=True)
     friend_id = Column(PGUUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class RecipeMedia(Base):
+    """Photos of a recipe. Position 0 is the cover, 1-5 are carousel slides."""
+
+    __tablename__ = "recipe_media"
+
+    recipe_id = Column(PGUUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), primary_key=True)
+    position = Column(SmallInteger, primary_key=True)
+    path = Column(String, nullable=False)
+    caption = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

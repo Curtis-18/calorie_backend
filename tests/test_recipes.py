@@ -246,7 +246,7 @@ def test_a_retry_returns_the_saved_recipe_not_a_copy(client, db, monkeypatch):
 
 def test_someone_elses_id_is_a_conflict(client, db, monkeypatch):
     usda(monkeypatch, {1: RICE, 2: CHICKEN})
-    db.recipes[RID] = SimpleNamespace(id=RID, owner_id=OTHER, deleted_at=None)
+    db.recipes[RID] = SimpleNamespace(id=RID, owner_id=OTHER, deleted_at=None, visibility="private")
     assert client.post("/recipes", json=body()).status_code == 409
 
 
@@ -267,7 +267,7 @@ def test_limits(client, db):
 
 
 def test_someone_elses_recipe_is_not_found(client, db):
-    db.recipes[RID] = SimpleNamespace(id=RID, owner_id=OTHER, deleted_at=None)
+    db.recipes[RID] = SimpleNamespace(id=RID, owner_id=OTHER, deleted_at=None, visibility="private")
     assert client.get(f"/recipes/{RID}").status_code == 404
     assert client.delete(f"/recipes/{RID}").status_code == 404
     assert client.patch(f"/recipes/{RID}", json={"title": "mine now"}).status_code == 404

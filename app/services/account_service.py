@@ -5,7 +5,7 @@ Everything a person owns hangs off their `auth.users` row: `profiles` cascades
 from it, and every app table cascades from `profiles`. So deleting that one row
 removes their food logs, targets, weigh-ins, friendships, blocks, bites,
 notification settings and device tokens. The only thing the database can't
-remove is the photos in storage (bites, stories, profile picture), which go first.
+remove is the photos in storage (bites, stories, profile picture, recipe photos), which go first.
 """
 
 import logging
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import auth_users
+from app.models.recipe import Recipe, RecipeMedia
 from app.models.snap import Snap
 from app.models.story import ProfileAvatar, Story
 from app.models.user import Profile
@@ -68,6 +69,9 @@ async def delete_account(db: AsyncSession, user_id: uuid.UUID) -> None:
         paths = list((await db.execute(select(Snap.storage_path).where(Snap.sender_id == user_id))).scalars().all())
         paths += await _optional_paths(db, select(Story.storage_path).where(Story.user_id == user_id))
         paths += await _optional_paths(db, select(ProfileAvatar.storage_path).where(ProfileAvatar.user_id == user_id))
+        paths += await _optional_paths(
+            db, select(RecipeMedia.path).join(Recipe, Recipe.id == RecipeMedia.recipe_id).where(Recipe.owner_id == user_id)
+        )
         if paths:
             try:
                 await storage_service.delete(paths)

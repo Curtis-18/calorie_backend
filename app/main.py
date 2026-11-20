@@ -14,7 +14,7 @@ from app.core.security import get_current_user_id
 from app.models.user import Profile
 from app.services import avatars
 from app.routers import (
-    account, adjustments, avatar, budget, collections, foods, friends, insights, logs, messages, notifications, photo_estimation, prefs, progress, recipes, reports, snaps, stories, targets, username,
+    account, adjustments, avatar, budget, collections, recipe_media, foods, friends, insights, logs, messages, notifications, photo_estimation, prefs, progress, recipes, reports, snaps, stories, targets, username,
     weights,
 )
 
@@ -60,6 +60,7 @@ app.include_router(budget.router)
 app.include_router(prefs.router)
 app.include_router(reports.router)
 app.include_router(recipes.router)
+app.include_router(recipe_media.router)
 app.include_router(collections.router)
 app.include_router(logs.router)
 app.include_router(targets.router)

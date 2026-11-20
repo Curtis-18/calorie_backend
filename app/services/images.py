@@ -1,9 +1,15 @@
 """Reading a photo the app sent as base64: size limits and a real type check."""
 
+import asyncio
 import base64
 import binascii
+import io
 
 from fastapi import HTTPException
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+MAX_SIDE = 1600
+MAX_PIXELS = 40_000_000  # refuses "decompression bomb" uploads before decoding them
 
 
 def image_type(data: bytes) -> tuple[str, str] | None:
@@ -35,3 +41,24 @@ def decode_photo(encoded: str, max_bytes: int) -> tuple[bytes, str, str]:
     if kind is None:
         raise HTTPException(415, "Only JPEG, PNG or WebP photos can be used.")
     return image, kind[0], kind[1]
+
+
+def _reencode(data: bytes) -> bytes:
+    Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im = ImageOps.exif_transpose(im)  # honour the phone's rotation, then drop the tag
+            im = im.convert("RGB")
+            im.thumbnail((MAX_SIDE, MAX_SIDE))
+            out = io.BytesIO()
+            # A fresh JPEG with no EXIF, so the photo's location and camera details are gone.
+            im.save(out, "JPEG", quality=85, optimize=True)
+            return out.getvalue()
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        raise HTTPException(415, "That photo couldn't be read. Try another one.")
+
+
+async def clean_photo(data: bytes) -> tuple[bytes, str, str]:
+    """Re-encode an upload as a plain JPEG: no metadata (EXIF location), at most
+    1600 px on a side. (bytes, mime type, extension)."""
+    return await asyncio.to_thread(_reencode, data), "image/jpeg", "jpg"

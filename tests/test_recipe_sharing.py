@@ -93,6 +93,9 @@ class Db:
     def add(self, obj):
         self.added.append(obj)
 
+    def add_all(self, objs):
+        self.added.extend(objs)
+
     async def delete(self, obj):
         self.deleted.append(obj)
 

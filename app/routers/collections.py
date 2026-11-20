@@ -13,6 +13,7 @@ from app.core.security import get_current_user_id
 from app.models.recipe import Collection, CollectionItem, Recipe, RecipePin, RecipeShare
 from app.routers.messages import _friend_ids
 from app.routers.recipes import _unavailable, readable
+from app.services import recipe_photos
 from app.schemas.recipes import CollectionIn, CollectionItemIn, HighlightsIn
 
 log = logging.getLogger("calorie_backend")
@@ -22,9 +23,10 @@ router = APIRouter(tags=["collections"])
 MAX_COLLECTIONS = 20
 
 
-def _summary(r: Recipe, me: uuid.UUID) -> dict:
+def _summary(r: Recipe, me: uuid.UUID, cover_url: str | None = None) -> dict:
     return {
         "id": str(r.id),
+        "cover_url": cover_url,
         "title": r.title,
         "calories_per_serving": r.calories_per_serving,
         "estimated": r.basis != "ingredients",
@@ -83,12 +85,18 @@ async def list_collections(user_id: uuid.UUID = Depends(get_current_user_id), db
         return []
 
     def allowed(r: Recipe) -> bool:
-        return r.owner_id == user_id or (r.id in shared_with_me and r.owner_id in friends)
+        if r.owner_id == user_id:
+            return True
+        return r.owner_id in friends and (r.visibility == "friends" or r.id in shared_with_me)
 
+    covers = await recipe_photos.covers(db, [rid for rid, r in recipes.items() if allowed(r)])
     out = []
     for c in collections:
         mine = [recipes[rid] for cid, rid, _ in items if cid == c.id and rid in recipes and allowed(recipes[rid])]
-        out.append({"id": str(c.id), "name": c.name, "is_default": c.is_default, "items": [_summary(r, user_id) for r in mine]})
+        out.append({
+            "id": str(c.id), "name": c.name, "is_default": c.is_default,
+            "items": [_summary(r, user_id, covers.get(r.id)) for r in mine],
+        })
     return out
 
 
@@ -195,7 +203,50 @@ async def get_highlights(user_id: uuid.UUID = Depends(get_current_user_id), db: 
         await db.rollback()
         log.warning("highlights not readable", exc_info=True)
         return []
-    return [_summary(r, user_id) for r in rows]
+    covers = await recipe_photos.covers(db, [r.id for r in rows])
+    return [_summary(r, user_id, covers.get(r.id)) for r in rows]
+
+
+@router.get("/users/{friend_id}/highlights")
+async def friend_highlights(
+    friend_id: uuid.UUID,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """A friend's Highlights: only the pinned recipes I am allowed to open (set
+    to "friends", or shared with me). Anyone who is not a friend, including
+    someone blocked, gets "not found". No counts, no totals."""
+    if friend_id == user_id:
+        return await get_highlights(user_id, db)
+    try:
+        if friend_id not in await _friend_ids(db, user_id):
+            raise HTTPException(status_code=404, detail="Not found")
+        rows = (
+            await db.execute(
+                select(Recipe)
+                .join(RecipePin, RecipePin.recipe_id == Recipe.id)
+                .where(RecipePin.user_id == friend_id, Recipe.owner_id == friend_id, Recipe.deleted_at.is_(None))
+                .order_by(RecipePin.position)
+            )
+        ).scalars().all()
+        private = [r.id for r in rows if r.visibility != "friends"]
+        shared: set = set()
+        if private:
+            shared = {
+                rid
+                for (rid,) in (
+                    await db.execute(select(RecipeShare.recipe_id).where(RecipeShare.recipe_id.in_(private), RecipeShare.friend_id == user_id))
+                ).all()
+            }
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+        log.warning("friend highlights not readable", exc_info=True)
+        return []
+    shown = [r for r in rows if r.visibility == "friends" or r.id in shared]
+    covers = await recipe_photos.covers(db, [r.id for r in shown])
+    return [_summary(r, user_id, covers.get(r.id)) for r in shown]
 
 
 @router.put("/highlights")

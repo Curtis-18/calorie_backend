@@ -11,14 +11,14 @@ from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.models.food_log import FoodLog
 from app.models.message import Message, MessageAttachment
-from app.models.recipe import Collection, CollectionItem, Recipe, RecipeEvent, RecipeIngredient, RecipeShare
+from app.models.recipe import Collection, CollectionItem, Recipe, RecipeEvent, RecipeIngredient, RecipeMedia, RecipeShare
 from app.models.user import Profile
 from app.core.rate_limit import messages_sent
 from app.routers.logs import _out as _log_out, _write_nutrients
 from app.routers.messages import _friend_ids, _out as _message_out, _require_friend
 from app.schemas.messages import MessageOut
 from app.schemas.recipes import RecipeIn, RecipeLogIn, RecipeUpdate, ShareIn
-from app.services import usda_service
+from app.services import avatars, recipe_photos, storage_service, usda_service
 from app.services.nutrients import NUTRIENT_KEYS
 from app.services.recipe_nutrition import Ingredient, PerServing, compute_per_serving, scale
 
@@ -42,10 +42,19 @@ def _ingredient_out(i: RecipeIngredient) -> dict:
         "source": i.source,
         "is_baseline": i.is_baseline,
         "calories_per_100g": i.calories_per_100g,
+        "protein_g_per_100g": i.protein_g_per_100g,
+        "carbs_g_per_100g": i.carbs_g_per_100g,
+        "fat_g_per_100g": i.fat_g_per_100g,
     }
 
 
-def _out(r: Recipe, ingredients: list[RecipeIngredient] | None = None, mine: bool = True, owner_name: str | None = None) -> dict:
+def _out(
+    r: Recipe,
+    ingredients: list[RecipeIngredient] | None = None,
+    mine: bool = True,
+    owner_name: str | None = None,
+    cover_url: str | None = None,
+) -> dict:
     out = {
         "id": str(r.id),
         "mine": mine,
@@ -65,6 +74,7 @@ def _out(r: Recipe, ingredients: list[RecipeIngredient] | None = None, mine: boo
         "basis": r.basis,
         # "estimated" is the honest label for anything the author typed in.
         "estimated": r.basis != "ingredients",
+        "cover_url": cover_url,
     }
     if ingredients is not None:
         out["ingredients"] = [_ingredient_out(i) for i in ingredients]
@@ -159,23 +169,27 @@ async def _mine(db: AsyncSession, user_id, recipe_id: uuid.UUID) -> Recipe:
 
 
 async def readable(db: AsyncSession, user_id, recipe_id: uuid.UUID) -> Recipe:
-    """A recipe I may open: my own, or one a friend shared with me (and only
-    while we are still friends). Anything else is "not found"."""
+    """A recipe I may open: my own, or a friend's that is set to "friends", or
+    one a friend shared with me. Only while we are still friends (blocking or
+    unfriending ends access at once). Anything else is "not found"."""
     recipe = await db.get(Recipe, recipe_id)
     if recipe is None or recipe.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Recipe not found")
     if recipe.owner_id == user_id:
         return recipe
-    try:
-        async with db.begin_nested():
-            shared = (
-                await db.execute(
-                    select(RecipeShare.recipe_id).where(RecipeShare.recipe_id == recipe_id, RecipeShare.friend_id == user_id)
-                )
-            ).first()
-    except Exception:  # noqa: BLE001
-        shared = None
-    if shared is None or recipe.owner_id not in await _friend_ids(db, user_id):
+    if recipe.visibility != "friends":
+        try:
+            async with db.begin_nested():
+                shared = (
+                    await db.execute(
+                        select(RecipeShare.recipe_id).where(RecipeShare.recipe_id == recipe_id, RecipeShare.friend_id == user_id)
+                    )
+                ).first()
+        except Exception:  # noqa: BLE001
+            shared = None
+        if shared is None:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+    if recipe.owner_id not in await _friend_ids(db, user_id):
         raise HTTPException(status_code=404, detail="Recipe not found")
     return recipe
 
@@ -190,6 +204,28 @@ async def _ingredients_of(db: AsyncSession, recipe_id) -> list[RecipeIngredient]
         .scalars()
         .all()
     )
+
+
+def _ingredient_rows(recipe_id, resolved: list[Ingredient]) -> list[RecipeIngredient]:
+    return [
+        RecipeIngredient(
+            recipe_id=recipe_id, position=n, name=i.name, grams=i.grams, fdc_id=i.fdc_id, source=i.source,
+            calories_per_100g=i.calories_per_100g, protein_g_per_100g=i.protein_g_per_100g,
+            carbs_g_per_100g=i.carbs_g_per_100g, fat_g_per_100g=i.fat_g_per_100g,
+            nutrients_per_100g=i.nutrients_per_100g or None, is_baseline=i.is_baseline,
+        )
+        for n, i in enumerate(resolved)
+    ]
+
+
+def _as_ingredients(rows: list[RecipeIngredient]) -> list[Ingredient]:
+    return [
+        Ingredient(
+            i.name, float(i.grams), i.source, i.fdc_id, i.calories_per_100g, i.protein_g_per_100g,
+            i.carbs_g_per_100g, i.fat_g_per_100g, i.nutrients_per_100g or {}, i.is_baseline,
+        )
+        for i in rows
+    ]
 
 
 @router.post("", status_code=201)
@@ -230,15 +266,7 @@ async def create_recipe(
         calories_per_serving=ps.calories, protein_g=ps.protein_g, carbs_g=ps.carbs_g, fat_g=ps.fat_g,
         nutrients=ps.nutrients or None, basis=ps.basis,
     )
-    rows = [
-        RecipeIngredient(
-            recipe_id=data.id, position=n, name=i.name, grams=i.grams, fdc_id=i.fdc_id, source=i.source,
-            calories_per_100g=i.calories_per_100g, protein_g_per_100g=i.protein_g_per_100g,
-            carbs_g_per_100g=i.carbs_g_per_100g, fat_g_per_100g=i.fat_g_per_100g,
-            nutrients_per_100g=i.nutrients_per_100g or None, is_baseline=i.is_baseline,
-        )
-        for n, i in enumerate(resolved)
-    ]
+    rows = _ingredient_rows(data.id, resolved)
     try:
         db.add(recipe)
         await db.flush()  # the recipe row must exist before its ingredients
@@ -267,17 +295,48 @@ async def list_recipes(user_id: uuid.UUID = Depends(get_current_user_id), db: As
         await db.rollback()
         log.warning("recipes not readable", exc_info=True)
         return []
-    return [_out(r) for r in rows]
+    covers = await recipe_photos.covers(db, [r.id for r in rows])
+    return [_out(r, cover_url=covers.get(r.id)) for r in rows]
 
 
 @router.get("/{recipe_id}")
 async def get_recipe(recipe_id: uuid.UUID, user_id: uuid.UUID = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
     recipe = await readable(db, user_id, recipe_id)
     mine = recipe.owner_id == user_id
-    return _out(
+    photos = await recipe_photos.media(db, recipe.id)
+    out = _out(
         recipe, await _ingredients_of(db, recipe.id), mine=mine,
         owner_name=None if mine else await _owner_name(db, recipe.owner_id),
+        cover_url=next((m["url"] for m in photos if m["position"] == recipe_photos.COVER), None),
     )
+    out["media"] = [m for m in photos if m["position"] != recipe_photos.COVER]
+    return out
+
+
+@router.get("/{recipe_id}/shares")
+async def list_shares(recipe_id: uuid.UUID, user_id: uuid.UUID = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+    """Who I have shared this recipe with, so I can take it back. Only the owner
+    can see this list. Rows stay until revoked, even if the friendship ended, so
+    an old share can never quietly come back to life."""
+    recipe = await _mine(db, user_id, recipe_id)
+    try:
+        async with db.begin_nested():
+            rows = (
+                await db.execute(
+                    select(RecipeShare.friend_id, Profile.username, RecipeShare.created_at)
+                    .join(Profile, Profile.id == RecipeShare.friend_id)
+                    .where(RecipeShare.recipe_id == recipe.id)
+                    .order_by(RecipeShare.created_at.desc())
+                )
+            ).all()
+    except Exception:  # noqa: BLE001
+        log.warning("shares not readable", exc_info=True)
+        return []
+    pictures = await avatars.avatar_urls(db, [f for f, _, _ in rows])
+    return [
+        {"friend_id": str(f), "username": name, "avatar_url": pictures.get(f), "shared_at": at.isoformat() if at else None}
+        for f, name, at in rows
+    ]
 
 
 @router.patch("/{recipe_id}")
@@ -294,28 +353,36 @@ async def update_recipe(
         if not changes["title"]:
             raise HTTPException(status_code=422, detail="The title can't be empty.")
     ingredients = await _ingredients_of(db, recipe.id)
-    for field in ("title", "description", "region", "tags", "steps"):
+    for field in ("title", "description", "region", "tags", "steps", "visibility"):
         if field in changes:
             setattr(recipe, field, changes[field])
-    if "servings" in changes and changes["servings"] != float(recipe.servings):
-        recipe.servings = changes["servings"]
+    new_servings = changes.get("servings", float(recipe.servings))
+    replaced = None
+    if "ingredients" in changes:
+        # Priced again on the server, with the same refusal-by-name rule as a new
+        # recipe. Entries already logged from this recipe are plain entries and
+        # keep their numbers.
+        resolved = await _resolve(data.ingredients)
+        replaced = _ingredient_rows(recipe.id, resolved)
+        ps = compute_per_serving(resolved, new_servings)
+        recipe.basis = ps.basis
+    elif "servings" in changes and changes["servings"] != float(recipe.servings) and ingredients:
         # Numbers are per serving, so a new serving count re-divides the same
         # ingredients. A recipe with no ingredient list keeps its own numbers.
-        if ingredients:
-            ps = compute_per_serving(
-                [
-                    Ingredient(
-                        i.name, float(i.grams), i.source, i.fdc_id, i.calories_per_100g, i.protein_g_per_100g,
-                        i.carbs_g_per_100g, i.fat_g_per_100g, i.nutrients_per_100g or {}, i.is_baseline,
-                    )
-                    for i in ingredients
-                ],
-                changes["servings"],
-            )
-            recipe.calories_per_serving, recipe.protein_g, recipe.carbs_g, recipe.fat_g = ps.calories, ps.protein_g, ps.carbs_g, ps.fat_g
-            recipe.nutrients = ps.nutrients or None
+        ps = compute_per_serving(_as_ingredients(ingredients), new_servings)
+    else:
+        ps = None
+    if "servings" in changes:
+        recipe.servings = changes["servings"]
+    if ps is not None:
+        recipe.calories_per_serving, recipe.protein_g, recipe.carbs_g, recipe.fat_g = ps.calories, ps.protein_g, ps.carbs_g, ps.fat_g
+        recipe.nutrients = ps.nutrients or None
     recipe.updated_at = datetime.now(timezone.utc)
     try:
+        if replaced is not None:
+            await db.execute(delete(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id))
+            db.add_all(replaced)
+            ingredients = replaced
         await db.commit()
     except Exception:  # noqa: BLE001
         await db.rollback()
@@ -330,12 +397,22 @@ async def delete_recipe(recipe_id: uuid.UUID, user_id: uuid.UUID = Depends(get_c
     logs stay countable for any later creator program."""
     recipe = await _mine(db, user_id, recipe_id)
     recipe.deleted_at = datetime.now(timezone.utc)
+    # The photos go with it (a deleted recipe is gone for everyone); the rows
+    # needed for later payouts are the events, not the pictures.
+    photo_paths = await recipe_photos.paths_of(db, recipe.id) if storage_service.configured() else []
     try:
+        if photo_paths:
+            await db.execute(delete(RecipeMedia).where(RecipeMedia.recipe_id == recipe.id))
         await db.commit()
     except Exception:  # noqa: BLE001
         await db.rollback()
         log.exception("recipe delete failed")
         raise _unavailable()
+    if photo_paths:
+        try:
+            await storage_service.delete(photo_paths)
+        except storage_service.StorageUnavailable:
+            log.warning("could not delete recipe photos %s", photo_paths)
     return Response(status_code=204)
 
 
