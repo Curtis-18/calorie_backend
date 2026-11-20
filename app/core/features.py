@@ -26,6 +26,7 @@ class Feature(str, enum.Enum):
     VOICE_NOTE = "voice_note"
     COACH_CHAT = "coach_chat"
     WEEKLY_REPORT = "weekly_report"
+    INSIGHTS = "insights"  # the AI narrative on Insights; counted per real generation, not per cache hit
     MENU_SCAN = "menu_scan"
     FRIDGE_SCAN = "fridge_scan"
     RECEIPT_SCAN = "receipt_scan"

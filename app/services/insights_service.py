@@ -90,7 +90,7 @@ async def generate_insights(
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"response_mime_type": "application/json"},
     }
-    data = await generate_content(payload)
+    data = await generate_content(payload, kind="insights")
 
     candidates = data.get("candidates") or []
     if not candidates:

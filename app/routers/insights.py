@@ -2,13 +2,14 @@ import logging
 import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dates import resolve_today  # noqa: F401 - re-exported for tests
+from app.core.features import Feature, record_usage, require_feature
 from app.core.rate_limit import insight_generations
 from app.core.security import get_current_user_id
 from app.models.insights_cache import InsightsCache
@@ -47,6 +48,7 @@ def _as_utc(value: datetime) -> datetime:
 async def get_insights(
     refresh: bool = False,
     date: date_type | None = None,
+    background: BackgroundTasks = None,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
@@ -76,6 +78,7 @@ async def get_insights(
         # Over the limit, fall through to the same degraded answer as an outage.
         if not insight_generations.allow("insights", user_id):
             raise RuntimeError("insights rate limit reached")
+        require_feature(user_id, Feature.INSIGHTS)
         payload = await generate_insights(db, user_id, trend, today)
     except Exception:  # noqa: BLE001 - the trend is still worth serving
         # Gemini being down (503 under load, or a timeout) must not take the
@@ -91,6 +94,11 @@ async def get_insights(
         return InsightsOut(
             **degraded_insights(trend), generated_at=datetime.now(timezone.utc)
         )
+
+    # Counted only for a real generation (cache hits cost nothing), after the
+    # response, so the free limit can later be chosen from real numbers.
+    if background is not None:
+        background.add_task(record_usage, user_id, Feature.INSIGHTS, today)
 
     now = datetime.now(timezone.utc)
     try:

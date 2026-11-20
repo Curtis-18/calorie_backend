@@ -30,6 +30,8 @@ class Settings(BaseSettings):
 
     usda_api_key: str
     usda_base_url: str = "https://api.nal.usda.gov/fdc/v1"
+    # Open Food Facts: the barcode fallback after USDA (no key needed).
+    off_base_url: str = "https://world.openfoodfacts.org/api/v2"
     gemini_api_key: str
     gemini_model: str = "gemini-3.6-flash"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
@@ -78,7 +80,7 @@ class Settings(BaseSettings):
             return v.replace("postgresql://", "postgresql+asyncpg://", 1)
         return v
 
-    @field_validator("supabase_url", "usda_base_url", "gemini_base_url")
+    @field_validator("supabase_url", "usda_base_url", "gemini_base_url", "off_base_url")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")

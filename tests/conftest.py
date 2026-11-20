@@ -79,3 +79,15 @@ def usage_db(monkeypatch):
     session = FakeUsageSession()
     monkeypatch.setattr(features, "_new_session", lambda: _Ctx(session))
     return session
+
+
+@pytest.fixture(autouse=True)
+def no_open_food_facts(monkeypatch):
+    """No test reaches the real Open Food Facts through the barcode route.
+    Tests of the fallback replace this again."""
+    from app.routers import foods
+
+    async def nothing(code):
+        return None
+
+    monkeypatch.setattr(foods, "lookup_off_barcode", nothing)

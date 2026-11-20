@@ -210,3 +210,12 @@ def test_the_hourly_limits_are_tight():
 
     assert rate_limit.photo_scans.limit == 20
     assert rate_limit.insight_generations.limit == 6
+
+
+async def test_an_explicit_kind_names_the_call_in_the_log(monkeypatch, caplog, thinking_state):
+    import logging
+
+    _install(monkeypatch, [_FakeResponse(200, payload={"usageMetadata": {"promptTokenCount": 5}})])
+    with caplog.at_level(logging.INFO, logger="calorie_backend"):
+        await gemini_client.generate_content({"contents": []}, kind="coach")
+    assert any("kind=coach" in r.getMessage() for r in caplog.records)

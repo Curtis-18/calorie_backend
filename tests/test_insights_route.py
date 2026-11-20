@@ -298,3 +298,52 @@ async def test_a_pull_to_refresh_still_regenerates_a_fresh_narrative(monkeypatch
 
     out = await insights_router.get_insights(refresh=True, user_id=uuid.uuid4(), db=FakeDb())
     assert called and out.narrative == "new"
+
+
+async def test_only_a_real_generation_is_counted_not_a_cache_hit(monkeypatch):
+    from fastapi import BackgroundTasks
+
+    async def trend(db, user_id, today):
+        return _trend()
+
+    async def new_insights(db, user_id, t, today):
+        return {"narrative": "new", "tips": [], "weekly_trend": t}
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", trend)
+    monkeypatch.setattr(insights_router, "generate_insights", new_insights)
+    insights_router.insight_generations.reset()
+
+    class _Result:
+        def __init__(self, cached):
+            self.cached = cached
+
+        def scalar_one_or_none(self):
+            return self.cached
+
+    class FakeDb:
+        def __init__(self, cached):
+            self.cached = cached
+
+        async def execute(self, stmt):
+            return _Result(self.cached)
+
+        async def commit(self):
+            pass
+
+        async def rollback(self):
+            pass
+
+    # No cache: one generation, one counted use of INSIGHTS.
+    tasks = BackgroundTasks()
+    await insights_router.get_insights(refresh=False, background=tasks, user_id=uuid.uuid4(), db=FakeDb(None))
+    assert [t.args[1] for t in tasks.tasks] == [insights_router.Feature.INSIGHTS]
+
+    # Fresh cache: served as is, nothing counted.
+    class Cached:
+        date = datetime.now(timezone.utc).date()
+        payload = {"narrative": "old", "tips": [], "weekly_trend": _trend()}
+        generated_at = _utcnow_naive()
+
+    tasks = BackgroundTasks()
+    out = await insights_router.get_insights(refresh=False, background=tasks, user_id=uuid.uuid4(), db=FakeDb(Cached()))
+    assert out.narrative == "old" and tasks.tasks == []

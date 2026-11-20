@@ -141,7 +141,7 @@ def test_no_note_means_the_prompt_is_unchanged():
 
     sent = []
 
-    async def fake(payload):
+    async def fake(payload, **kwargs):
         sent.append(payload["contents"][0]["parts"][0]["text"])
         return _data([])
 

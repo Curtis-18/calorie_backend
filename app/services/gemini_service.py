@@ -112,6 +112,6 @@ async def identify_foods(image_bytes: bytes, mime_type: str, note: str | None = 
         "generationConfig": _API_ERRORS,
     }
 
-    data = await generate_content(payload)
+    data = await generate_content(payload, kind="scan")
 
     return _extract_items(data)

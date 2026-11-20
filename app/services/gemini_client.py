@@ -58,11 +58,11 @@ def _kind(payload: dict) -> str:
     return "insights"
 
 
-def _log_call(payload: dict, data: dict, attempts: int, started: float) -> None:
+def _log_call(payload: dict, data: dict, attempts: int, started: float, kind: str | None = None) -> None:
     usage = data.get("usageMetadata") or {}
     log.info(
         "gemini_call kind=%s model=%s attempts=%d ms=%d prompt_tokens=%s output_tokens=%s thought_tokens=%s",
-        _kind(payload),
+        kind or _kind(payload),
         settings.gemini_model,
         attempts,
         (time.monotonic() - started) * 1000,
@@ -72,8 +72,11 @@ def _log_call(payload: dict, data: dict, attempts: int, started: float) -> None:
     )
 
 
-async def generate_content(payload: dict, timeout: float = 30.0) -> dict:
+async def generate_content(payload: dict, timeout: float = 30.0, kind: str | None = None) -> dict:
     """POST to Gemini, retrying transient failures with exponential backoff.
+
+    [kind] names the feature for the spend log line (scan, insights, coach, ...);
+    when omitted it is inferred from the payload (an attached image = scan).
 
     Returns the decoded JSON body. Raises the last HTTP error (or transport
     error) once every attempt is exhausted, so callers can still decide how to
@@ -109,7 +112,7 @@ async def generate_content(payload: dict, timeout: float = 30.0) -> dict:
             else:
                 if response.status_code < 400:
                     data = response.json()
-                    _log_call(payload, data, attempt, started)
+                    _log_call(payload, data, attempt, started, kind)
                     return data
 
                 log.error(
