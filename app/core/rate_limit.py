@@ -53,3 +53,5 @@ food_searches = RateLimit(90, 60)
 # script walking the alphabet to list every username.
 people_searches = RateLimit(60, 60)
 messages_sent = RateLimit(60, 60)
+# Every coach turn is a paid Gemini call. A daily free allowance joins this in P6.
+coach_turns = RateLimit(20, 3600)
