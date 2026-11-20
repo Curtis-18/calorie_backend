@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dates import resolve_today
 from app.core.features import Feature, require_feature
+from app.core.language import get_language
 from app.core.security import get_current_user_id
 from app.models.food_log import FoodLog
 from app.models.food_log_nutrients import FoodLogNutrients
@@ -26,6 +27,7 @@ async def weekly_report(
     date: date_type | None = None,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
+    lang: str = Depends(get_language),
 ):
     """Your week in a few kind lines, plus any habit pattern the data supports.
 
@@ -65,7 +67,7 @@ async def weekly_report(
                 fiber_g=_known(known, "fiber_g"),
             )
         )
-    return build_report(entries, today, protein_target, fiber_target)
+    return build_report(entries, today, protein_target, fiber_target, lang)
 
 
 def _known(nutrients: dict, key: str) -> float | None:

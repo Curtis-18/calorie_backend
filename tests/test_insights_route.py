@@ -35,7 +35,7 @@ async def test_insights_survive_a_cache_write_failure(monkeypatch):
     async def fake_trend(db, user_id, today):
         return _trend()
 
-    async def fake_generate(db, user_id, trend, today):
+    async def fake_generate(db, user_id, trend, today, lang="en"):
         return {"narrative": "hi", "tips": ["a"], "weekly_trend": trend}
 
     monkeypatch.setattr(insights_router, "get_weekly_trend", fake_trend)
@@ -63,7 +63,7 @@ async def test_insights_survive_a_cache_write_failure(monkeypatch):
             self.rolled_back = True
 
     db = FakeDb()
-    out = await insights_router.get_insights(user_id=uuid.uuid4(), db=db)
+    out = await insights_router.get_insights(user_id=uuid.uuid4(), db=db, lang="en")
 
     assert isinstance(out, InsightsOut)
     assert out.narrative == "hi"
@@ -97,7 +97,7 @@ async def test_cached_insights_report_an_explicit_utc_offset(monkeypatch):
             return _Result()
 
     out = await insights_router.get_insights(
-        refresh=False, user_id=uuid.uuid4(), db=FakeDb()
+        refresh=False, user_id=uuid.uuid4(), db=FakeDb(), lang="en"
     )
     assert out.generated_at.tzinfo is not None
 
@@ -111,7 +111,7 @@ async def test_a_meal_logged_after_the_first_visit_regenerates_the_narrative(mon
     async def new_trend(db, user_id, today):
         return fresh
 
-    async def new_insights(db, user_id, trend, today):
+    async def new_insights(db, user_id, trend, today, lang="en"):
         generated.append(trend)
         return {"narrative": "you logged a meal", "tips": [], "weekly_trend": trend}
 
@@ -137,7 +137,7 @@ async def test_a_meal_logged_after_the_first_visit_regenerates_the_narrative(mon
         async def rollback(self):
             pass
 
-    out = await insights_router.get_insights(refresh=False, user_id=uuid.uuid4(), db=FakeDb())
+    out = await insights_router.get_insights(refresh=False, user_id=uuid.uuid4(), db=FakeDb(), lang="en")
     assert generated == [fresh]
     assert out.narrative == "you logged a meal"
 
@@ -179,7 +179,7 @@ async def test_insights_use_the_device_date_for_trend_prompt_and_cache(monkeypat
         seen["trend_today"] = today
         return _trend()
 
-    async def fake_generate(db, user_id, trend, today):
+    async def fake_generate(db, user_id, trend, today, lang="en"):
         seen["generate_today"] = today
         return {"narrative": "hi", "tips": [], "weekly_trend": trend}
 
@@ -213,7 +213,7 @@ async def test_insights_use_the_device_date_for_trend_prompt_and_cache(monkeypat
 
     db = FakeDb()
     out = await insights_router.get_insights(
-        refresh=False, date=device_today, user_id=uuid.uuid4(), db=db
+        refresh=False, date=device_today, user_id=uuid.uuid4(), db=db, lang="en"
     )
 
     assert out.narrative == "hi"
@@ -256,7 +256,7 @@ async def test_logging_a_food_does_not_call_gemini_while_the_narrative_is_fresh(
         async def execute(self, stmt):
             return _Result()
 
-    out = await insights_router.get_insights(refresh=False, user_id=uuid.uuid4(), db=FakeDb())
+    out = await insights_router.get_insights(refresh=False, user_id=uuid.uuid4(), db=FakeDb(), lang="en")
     assert out.narrative == "earlier text"
     assert out.weekly_trend[-1].calories == 450  # the chart is live
 
@@ -269,7 +269,7 @@ async def test_a_pull_to_refresh_still_regenerates_a_fresh_narrative(monkeypatch
     async def trend(db, user_id, today):
         return _trend()
 
-    async def new_insights(db, user_id, t, today):
+    async def new_insights(db, user_id, t, today, lang="en"):
         called.append(1)
         return {"narrative": "new", "tips": [], "weekly_trend": t}
 
@@ -296,7 +296,7 @@ async def test_a_pull_to_refresh_still_regenerates_a_fresh_narrative(monkeypatch
         async def rollback(self):
             pass
 
-    out = await insights_router.get_insights(refresh=True, user_id=uuid.uuid4(), db=FakeDb())
+    out = await insights_router.get_insights(refresh=True, user_id=uuid.uuid4(), db=FakeDb(), lang="en")
     assert called and out.narrative == "new"
 
 
@@ -306,7 +306,7 @@ async def test_only_a_real_generation_is_counted_not_a_cache_hit(monkeypatch):
     async def trend(db, user_id, today):
         return _trend()
 
-    async def new_insights(db, user_id, t, today):
+    async def new_insights(db, user_id, t, today, lang="en"):
         return {"narrative": "new", "tips": [], "weekly_trend": t}
 
     monkeypatch.setattr(insights_router, "get_weekly_trend", trend)
@@ -335,7 +335,7 @@ async def test_only_a_real_generation_is_counted_not_a_cache_hit(monkeypatch):
 
     # No cache: one generation, one counted use of INSIGHTS.
     tasks = BackgroundTasks()
-    await insights_router.get_insights(refresh=False, background=tasks, user_id=uuid.uuid4(), db=FakeDb(None))
+    await insights_router.get_insights(refresh=False, background=tasks, user_id=uuid.uuid4(), db=FakeDb(None), lang="en")
     assert [t.args[1] for t in tasks.tasks] == [insights_router.Feature.INSIGHTS]
 
     # Fresh cache: served as is, nothing counted.
@@ -345,5 +345,5 @@ async def test_only_a_real_generation_is_counted_not_a_cache_hit(monkeypatch):
         generated_at = _utcnow_naive()
 
     tasks = BackgroundTasks()
-    out = await insights_router.get_insights(refresh=False, background=tasks, user_id=uuid.uuid4(), db=FakeDb(Cached()))
+    out = await insights_router.get_insights(refresh=False, background=tasks, user_id=uuid.uuid4(), db=FakeDb(Cached()), lang="en")
     assert out.narrative == "old" and tasks.tasks == []

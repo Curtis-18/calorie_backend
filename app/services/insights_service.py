@@ -5,6 +5,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.food_log import FoodLog
+from app.i18n import LANGUAGE_NAMES, t
 from app.models.target import Target
 from app.services.gemini_client import generate_content
 
@@ -22,7 +23,10 @@ Rules for any numbers you mention:
 - If today so far is 0 kcal, say nothing has been logged yet today.
 
 Respond with ONLY a JSON object, no other text, in this exact shape:
-{{"narrative": "2-3 sentence summary of how today and this week are going", "tips": ["short actionable tip", "short actionable tip", "short actionable tip"]}}"""
+{{"narrative": "2-3 sentence summary of how today and this week are going", "tips": ["short actionable tip", "short actionable tip", "short actionable tip"]}}{language_rule}"""
+
+# Added only for a language other than English, so the English prompt is unchanged.
+LANGUAGE_RULE = "\nWrite the narrative and the tips in {language}. Keep the JSON keys as shown, and keep every number as given."
 
 
 async def get_weekly_trend(db: AsyncSession, user_id: str, today: date_type) -> list[dict]:
@@ -58,7 +62,7 @@ async def get_weekly_trend(db: AsyncSession, user_id: str, today: date_type) -> 
 
 
 async def generate_insights(
-    db: AsyncSession, user_id: str, trend: list[dict], today: date_type
+    db: AsyncSession, user_id: str, trend: list[dict], today: date_type, lang: str = "en"
 ) -> dict:
     target_result = await db.execute(select(Target).where(Target.user_id == user_id))
     target = target_result.scalar_one_or_none()
@@ -84,6 +88,7 @@ async def generate_insights(
         today_carbs=today_totals["carbs_g"],
         today_fat=today_totals["fat_g"],
         trend_lines=trend_lines,
+        language_rule=LANGUAGE_RULE.format(language=LANGUAGE_NAMES[lang]) if lang in LANGUAGE_NAMES and lang != "en" else "",
     )
 
     payload = {
@@ -107,6 +112,7 @@ async def generate_insights(
         "narrative": parsed.get("narrative") or "",
         "tips": tips,
         "weekly_trend": trend,
+        "language": lang,  # so a cached answer is not served in another language
     }
 
 
@@ -123,7 +129,7 @@ FALLBACK_TIPS = [
 ]
 
 
-def degraded_insights(trend: list[dict]) -> dict:
+def degraded_insights(trend: list[dict], lang: str = "en") -> dict:
     """A usable payload when Gemini is unreachable.
 
     The weekly trend is computed from our own logs, so the chart still renders;
@@ -131,7 +137,7 @@ def degraded_insights(trend: list[dict]) -> dict:
     instead of failing the whole request with a 500.
     """
     return {
-        "narrative": FALLBACK_NARRATIVE,
-        "tips": list(FALLBACK_TIPS),
+        "narrative": t(lang, FALLBACK_NARRATIVE),
+        "tips": [t(lang, tip) for tip in FALLBACK_TIPS],
         "weekly_trend": trend,
     }

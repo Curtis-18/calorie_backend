@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user_id
+from app.i18n import SUPPORTED
 from app.models.user_prefs import UserPrefs
+from app.services import language_pref
 from app.services.regions import REGIONS, is_region
 
 log = logging.getLogger("calorie_backend")
@@ -64,3 +66,22 @@ async def set_food_prefs(
         log.exception("could not save the region")
         raise HTTPException(status_code=503, detail="Couldn't save that right now. Try again in a little while.")
     return _out(data.region)
+
+
+class LanguageIn(BaseModel):
+    language: str
+
+
+@router.post("/language", status_code=204)
+async def set_language(
+    data: LanguageIn,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """The language the app is showing, so push notifications can use it. A
+    best-effort note: it never fails the app (before the migration it is a no-op)."""
+    if data.language.strip().lower()[:2] not in SUPPORTED:
+        raise HTTPException(status_code=422, detail="Unsupported language.")
+    await language_pref.remember(db, user_id, data.language)
+    await db.commit()
+    return None

@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
 
+from app.i18n import t
+
 DAYS = 7
 MAX_TRIM = 0.15       # an allowance never goes more than this far below the target
 MAX_BONUS = 0.15      # ... or above it
@@ -146,6 +148,7 @@ def compute_nudge(
     target: int,
     floor: int,
     goal: str,
+    lang: str = "en",
 ) -> Nudge | None:
     """A kind, optional suggestion after a bigger day, or None.
 
@@ -168,7 +171,7 @@ def compute_nudge(
             over_by=round(over),
             days=days_left_after_today,
             per_day=None,
-            message="Today was a bigger one, and that's fine. A normal day tomorrow is all you need.",
+            message=t(lang, "Today was a bigger one, and that's fine. A normal day tomorrow is all you need."),
         )
     return Nudge(
         kind="spread",
@@ -176,9 +179,11 @@ def compute_nudge(
         days=days_left_after_today,
         per_day=per_day,
         message=(
-            f"You're about {_round_to(over, 10)} over today. "
-            f"Want to ease about {per_day} a day over the next {days_left_after_today} "
-            f"day{'s' if days_left_after_today != 1 else ''}?"
+            t(lang, "You're about {over} over today. Want to ease about {per_day} a day over the next day?",
+              over=_round_to(over, 10), per_day=per_day)
+            if days_left_after_today == 1
+            else t(lang, "You're about {over} over today. Want to ease about {per_day} a day over the next {days} days?",
+                   over=_round_to(over, 10), per_day=per_day, days=days_left_after_today)
         ),
     )
 

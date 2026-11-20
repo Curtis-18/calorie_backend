@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dates import resolve_today
+from app.core.language import get_language
 from app.core.security import get_current_user_id
+from app.i18n import t
 from app.models.budget_prefs import BudgetPrefs
 from app.models.food_log import FoodLog
 from app.models.target import Target
@@ -129,6 +131,7 @@ async def get_week(
     date: date_type | None = None,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
+    lang: str = Depends(get_language),
 ):
     """This week's allowance, derived from the logs (nothing is stored).
 
@@ -171,6 +174,7 @@ async def get_week(
             target=target.calorie_target,
             floor=floor,
             goal=target.goal,
+            lang=lang,
         )
         if found is not None:
             nudge = {
@@ -186,7 +190,7 @@ async def get_week(
         "floor": floor,
         "allowance_today": shown,
         "bank": week.bank,
-        "explanation": _explain(week.bank, weekly),
+        "explanation": _explain(week.bank, weekly, lang),
         "days": [
             {"date": d.day, "base": d.base, "eaten": d.eaten, "state": d.state, "allowance": d.allowance}
             for d in week.days
@@ -195,14 +199,15 @@ async def get_week(
     }
 
 
-def _explain(bank: int, weekly: bool) -> str:
+def _explain(bank: int, weekly: bool, lang: str = "en") -> str:
     if not weekly:
-        return "Your target is the same every day."
+        return t(lang, "Your target is the same every day.")
     if abs(bank) < 25:
-        return "You're right on plan this week, so today's target is your usual one."
+        return t(lang, "You're right on plan this week, so today's target is your usual one.")
     if bank < 0:
-        return (
+        return t(
+            lang,
             "A recent day had a bit extra, so today's plan is a little lower. "
-            "It's spread over the rest of the week so no single day takes it all."
+            "It's spread over the rest of the week so no single day takes it all.",
         )
-    return "A recent day had a bit left over, so today's plan has a little extra room."
+    return t(lang, "A recent day had a bit left over, so today's plan has a little extra room.")

@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from statistics import mean
 
+from app.i18n import t
+
 WINDOW_DAYS = 28
 MIN_DAYS_FOR_PATTERNS = 14
 LATE_HOUR = 20                 # 8 PM
@@ -113,7 +115,7 @@ def _pct(x: float) -> int:
     return round(x * 100)
 
 
-def find_patterns(days: list[DayFeatures], fiber_target: int | None = None) -> list[Pattern]:
+def find_patterns(days: list[DayFeatures], fiber_target: int | None = None, lang: str = "en") -> list[Pattern]:
     if len(days) < MIN_DAYS_FOR_PATTERNS:
         return []
     found: list[Pattern] = []
@@ -127,11 +129,12 @@ def find_patterns(days: list[DayFeatures], fiber_target: int | None = None) -> l
         if gap >= MIN_LATE_SHARE_GAP:
             found.append(Pattern(
                 id="lunch_protein_evening",
-                text=(
-                    f"On days you log under {LOW_LUNCH_PROTEIN_G} g of protein at lunch, about {_pct(mean(low))}% "
-                    f"of your calories are logged after 8 PM, compared with {_pct(mean(high))}% on other days."
+                text=t(
+                    lang,
+                    "On days you log under {limit} g of protein at lunch, about {low}% of your calories are logged after 8 PM, compared with {high}% on other days.",
+                    limit=LOW_LUNCH_PROTEIN_G, low=_pct(mean(low)), high=_pct(mean(high)),
                 ),
-                tip="A protein-rich lunch (eggs, yogurt, beans, chicken) might help evenings feel steadier. Worth trying for a week.",
+                tip=t(lang, "A protein-rich lunch (eggs, yogurt, beans, chicken) might help evenings feel steadier. Worth trying for a week."),
                 strength=gap,
             ))
 
@@ -143,8 +146,8 @@ def find_patterns(days: list[DayFeatures], fiber_target: int | None = None) -> l
         if ratio - 1 >= MIN_WEEKEND_GAP:
             found.append(Pattern(
                 id="weekend_higher",
-                text=f"Your weekends tend to be about {_pct(ratio - 1)}% higher than your weekdays.",
-                tip="That's very normal. Weekend flex in Settings plans for it, so the week still balances.",
+                text=t(lang, "Your weekends tend to be about {pct}% higher than your weekdays.", pct=_pct(ratio - 1)),
+                tip=t(lang, "That's very normal. Weekend flex in Settings plans for it, so the week still balances."),
                 strength=ratio - 1,
             ))
 
@@ -153,8 +156,8 @@ def find_patterns(days: list[DayFeatures], fiber_target: int | None = None) -> l
     if len(shares) >= MIN_LATE_DAYS and mean(shares) >= HIGH_LATE_SHARE:
         found.append(Pattern(
             id="late_share",
-            text=f"About {_pct(mean(shares))}% of the calories you log come after 8 PM.",
-            tip="If you'd like to even things out, a planned afternoon snack with some protein can help.",
+            text=t(lang, "About {pct}% of the calories you log come after 8 PM.", pct=_pct(mean(shares))),
+            tip=t(lang, "If you'd like to even things out, a planned afternoon snack with some protein can help."),
             strength=mean(shares) - HIGH_LATE_SHARE + 0.05,
         ))
 
@@ -168,14 +171,14 @@ def find_patterns(days: list[DayFeatures], fiber_target: int | None = None) -> l
         if gap >= MIN_SUGAR_GAP:
             found.append(Pattern(
                 id="lunch_protein_evening_sugar",
-                text=(
-                    f"On days you log under {LOW_LUNCH_PROTEIN_G} g of protein at lunch, about {_pct(mean(s_low))}% "
-                    f"of the sugar in the foods we could match is logged after 8 PM, compared with "
-                    f"{_pct(mean(s_high))}% on other days."
+                text=t(
+                    lang,
+                    "On days you log under {limit} g of protein at lunch, about {low}% of the sugar in the foods we could match is logged after 8 PM, compared with {high}% on other days.",
+                    limit=LOW_LUNCH_PROTEIN_G, low=_pct(mean(s_low)), high=_pct(mean(s_high)),
                 ),
-                tip=(
-                    "Some of that is natural sugar from fruit and milk, so it isn't about sweets. "
-                    "A protein-rich lunch might help evenings feel steadier. Worth trying for a week."
+                tip=t(
+                    lang,
+                    "Some of that is natural sugar from fruit and milk, so it isn't about sweets. A protein-rich lunch might help evenings feel steadier. Worth trying for a week.",
                 ),
                 strength=gap,
             ))
@@ -190,11 +193,12 @@ def find_patterns(days: list[DayFeatures], fiber_target: int | None = None) -> l
             if share >= FIBRE_LOW_DAYS_SHARE:
                 found.append(Pattern(
                     id="low_fibre",
-                    text=(
-                        f"On {low_days} of the {len(judged)} days we could check, the foods we matched came to "
-                        f"under your fibre guide of about {fiber_target} g."
+                    text=t(
+                        lang,
+                        "On {low} of the {n} days we could check, the foods we matched came to under your fibre guide of about {target} g.",
+                        low=low_days, n=len(judged), target=fiber_target,
                     ),
-                    tip="Beans, lentils, oats, berries and whole grains are easy ways to add fibre, one swap at a time.",
+                    tip=t(lang, "Beans, lentils, oats, berries and whole grains are easy ways to add fibre, one swap at a time."),
                     strength=share - 0.5,
                 ))
 
@@ -211,25 +215,25 @@ def weekly_summary(days: list[DayFeatures], today: date, protein_target: int | N
     return {"days_logged": len(week), "protein_goal_days": protein_days}
 
 
-def summary_message(days_logged: int) -> str:
+def summary_message(days_logged: int, lang: str = "en") -> str:
     if days_logged == 0:
-        return "A fresh week. Log anything today and your week starts to fill in."
+        return t(lang, "A fresh week. Log anything today and your week starts to fill in.")
     if days_logged >= 6:
-        return f"You logged {days_logged} of the last 7 days. That consistency is what makes the difference."
-    return f"You logged {days_logged} of the last 7 days. Every day you log makes your insights sharper."
+        return t(lang, "You logged {n} of the last 7 days. That consistency is what makes the difference.", n=days_logged)
+    return t(lang, "You logged {n} of the last 7 days. Every day you log makes your insights sharper.", n=days_logged)
 
 
 def build_report(
-    entries: list[Entry], today: date, protein_target: int | None, fiber_target: int | None = None
+    entries: list[Entry], today: date, protein_target: int | None, fiber_target: int | None = None, lang: str = "en"
 ) -> dict:
     days = day_features(entries)
     summary = weekly_summary(days, today, protein_target)
     enough = len(days) >= MIN_DAYS_FOR_PATTERNS
-    patterns = find_patterns(days, fiber_target)
+    patterns = find_patterns(days, fiber_target, lang)
     return {
         **summary,
         "protein_target": protein_target,
-        "message": summary_message(summary["days_logged"]),
+        "message": summary_message(summary["days_logged"], lang),
         "logged_days_recently": len(days),
         "enough_data": enough,
         "days_needed": max(0, MIN_DAYS_FOR_PATTERNS - len(days)),

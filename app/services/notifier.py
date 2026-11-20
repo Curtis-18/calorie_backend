@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.notification import DeviceToken, NotificationLog, NotificationPrefs
-from app.services import push_sender
+from app.services import language_pref, push_sender
 from app.services.notification_rules import Kind, Prefs, copy_for, decide, local_day_bounds_utc
 
 log = logging.getLogger("calorie_backend")
@@ -80,7 +80,8 @@ async def notify(
     if not decision.allowed:
         return decision.reason
 
-    title, body = copy_for(kind, dedupe_key or str(uuid.uuid4()), **ctx)
+    lang = await language_pref.recall(db, user_id)
+    title, body = copy_for(kind, dedupe_key or str(uuid.uuid4()), lang, **ctx)
 
     # Claim the dedupe key first: if it is already taken (the scheduler ran
     # twice, or the app retried), do nothing. The unique index decides.

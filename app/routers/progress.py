@@ -12,6 +12,7 @@ from app.models.food_log import FoodLog
 from app.models.target import Target
 from app.models.weight_log import WeightLog
 from app.schemas.progress import ProgressOut
+from app.core.language import get_language
 from app.services.progress_service import LogRow, compute_progress
 
 router = APIRouter(prefix="/progress", tags=["progress"])
@@ -22,6 +23,7 @@ async def get_progress(
     date: date_type | None = None,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
+    lang: str = Depends(get_language),
 ):
     """Streak, freezes, XP, level and achievements, derived from the logs.
 
@@ -68,4 +70,5 @@ async def get_progress(
         calorie_target=target[0] if target else None,
         protein_target=target[1] if target else None,
         weigh_in_dates=weigh_in_dates,
+        lang=lang,
     )

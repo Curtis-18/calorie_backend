@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from app.i18n import t
+
 MEAL_TYPES = frozenset({"breakfast", "lunch", "dinner", "snack"})
 
 # XP rules (per day). Caps stop a burst of tiny logs from farming XP.
@@ -91,7 +93,7 @@ class Achievement:
 ACHIEVEMENTS = [
     Achievement("first_bite", "First Bite", "Log your first meal."),
     Achievement("snapshot", "Snapshot", "Log a meal by scanning a photo."),
-    Achievement("early_bird", "Early Bird", f"Log breakfast before {EARLY_BIRD_HOUR} am."),
+    Achievement("early_bird", "Early Bird", "Log breakfast before {hour} am."),
     Achievement("full_house", "Full House", "Log breakfast, lunch, dinner and a snack in one day."),
     Achievement("bullseye", "Bullseye", "Land within 10% of your calorie target."),
     Achievement("protein_pro", "Protein Pro", "Hit your protein target 5 days in a row.", goal=5),
@@ -175,6 +177,7 @@ def compute_progress(
     calorie_target: int | None,
     protein_target: int | None,
     weigh_in_dates: list[date] | None = None,
+    lang: str = "en",
 ) -> dict:
     """Score a user's whole history up to and including [today].
 
@@ -286,8 +289,8 @@ def compute_progress(
         "achievements": [
             {
                 "id": a.id,
-                "title": a.title,
-                "description": a.description,
+                "title": t(lang, a.title),
+                "description": t(lang, a.description, hour=EARLY_BIRD_HOUR),
                 "unlocked": a.id in unlocked,
                 "unlocked_on": unlocked.get(a.id),
                 "progress": min(progress_values[a.id], a.goal),

@@ -1,6 +1,7 @@
 import base64
 import json
 
+from app.i18n import LANGUAGE_NAMES
 from app.services.gemini_client import generate_content
 from app.services.regions import region_label
 
@@ -28,6 +29,12 @@ REGION_PROMPT = """
 
 The person mostly eats {region} food. Use that only as context when naming a dish you can see (for example which regional dish a stew is). Never name something you cannot see, and never change what is visible because of it."""
 
+# Only for a language other than English. The English "name" stays as it is
+# (the food database is searched with it); this is what the person reads.
+LANGUAGE_PROMPT = """
+
+The person reads {language}. For each item also give "local_name": the food's name in {language}, short and natural (what they would call it). Keep "name" in English exactly as before. Write "note_applied", when you give one, in {language}."""
+
 ADDED_EXTRAS = {"oil", "butter", "dressing", "cheese", "sugar"}
 
 PREPARATIONS = {"raw", "grilled", "fried", "boiled", "baked", "sauteed", "unknown"}
@@ -49,6 +56,7 @@ _API_ERRORS = {
                 "kind": {"type": "STRING"},
                 "added": {"type": "ARRAY", "items": {"type": "STRING"}},
                 "note_applied": {"type": "STRING"},
+                "local_name": {"type": "STRING"},
             },
             "required": ["name", "estimated_grams"],
         },
@@ -95,6 +103,9 @@ def _extract_items(data: dict) -> list[dict]:
         added = [a for a in dict.fromkeys(added) if a in ADDED_EXTRAS]
         if added:
             item["added"] = added
+        local = " ".join(str(entry.get("local_name") or "").split())[:80]
+        if local and local.lower() != item["name"].lower():
+            item["local_name"] = local
         reason = entry.get("note_applied")
         if isinstance(reason, str) and reason.strip():
             item["note_applied"] = reason.strip()[:80]
@@ -103,7 +114,7 @@ def _extract_items(data: dict) -> list[dict]:
 
 
 async def identify_foods(
-    image_bytes: bytes, mime_type: str, note: str | None = None, region: str | None = None
+    image_bytes: bytes, mime_type: str, note: str | None = None, region: str | None = None, lang: str = "en"
 ) -> list[dict]:
     encoded_image = base64.b64encode(image_bytes).decode("utf-8")
     label = region_label(region)
@@ -112,7 +123,7 @@ async def identify_foods(
         "contents": [
             {
                 "parts": [
-                    {"text": PROMPT + (REGION_PROMPT.format(region=label) if label else "") + (NOTE_PROMPT.format(note=note) if note else "")},
+                    {"text": PROMPT + (REGION_PROMPT.format(region=label) if label else "") + (NOTE_PROMPT.format(note=note) if note else "") + (LANGUAGE_PROMPT.format(language=LANGUAGE_NAMES[lang]) if lang != "en" and lang in LANGUAGE_NAMES else "")},
                     {"inline_data": {"mime_type": mime_type, "data": encoded_image}},
                 ]
             }

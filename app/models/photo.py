@@ -10,6 +10,9 @@ class EstimatedFood(BaseModel):
 
     name: str
     estimated_grams: float
+    # The name in the person's language, when it is not English. `name` stays
+    # English because the food database is searched with it.
+    display_name: str | None = None
     # What Gemini could see of how it was made and what it is, so the app
     # offers only the extras that make sense (oil on a fried food, not on fruit).
     preparation: str | None = None

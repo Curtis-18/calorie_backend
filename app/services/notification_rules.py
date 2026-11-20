@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 
+from app.i18n import t
+
 DAILY_CAP = 3
 
 
@@ -139,13 +141,13 @@ _COPY: dict[Kind, list[tuple[str, str]]] = {
 }
 
 
-def copy_for(kind: Kind, key: str, **ctx) -> tuple[str, str]:
+def copy_for(kind: Kind, key: str, lang: str = "en", **ctx) -> tuple[str, str]:
     options = _COPY[kind]
     index = int(hashlib.sha256(f"{kind.value}:{key}".encode()).hexdigest(), 16) % len(options)
     title, body = options[index]
     values = {"name": "", "emoji": "", "count": 0}
     values.update(ctx)
-    return title.format(**values), body.format(**values)
+    return t(lang, title, **values), t(lang, body, **values)
 
 
 # --- streak reminders --------------------------------------------------------

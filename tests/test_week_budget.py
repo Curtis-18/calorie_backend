@@ -162,7 +162,7 @@ def test_no_nudge_on_the_last_day_or_for_a_gain_goal():
 
 
 def test_a_single_day_left_is_worded_in_the_singular():
-    assert "over the next 1 day?" in _nudge(2200, left=1).message
+    assert "over the next day?" in _nudge(2200, left=1).message
 
 
 def test_too_big_to_spread_offers_nothing():

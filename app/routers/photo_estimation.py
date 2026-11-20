@@ -13,6 +13,7 @@ from app.core.dates import resolve_today
 from app.core.features import Feature, record_usage, require_feature
 from app.core.rate_limit import photo_scans
 from app.core.security import get_current_user_id
+from app.core.language import get_language
 from app.models.photo import EstimatedFood
 from app.services.estimates import estimate_foods
 from app.services.gemini_service import identify_foods
@@ -64,6 +65,7 @@ async def estimate_photo(
     request: PhotoRequest,
     background: BackgroundTasks,
     user_id: uuid.UUID = Depends(get_current_user_id),
+    lang: str = Depends(get_language),
 ):
     # Check the encoded length first: decoding an unbounded payload lets one
     # request pin a few hundred MB of RAM on a small Render instance.
@@ -97,6 +99,8 @@ async def estimate_photo(
             extras["note"] = note
         if region:
             extras["region"] = region
+        if lang != "en":
+            extras["lang"] = lang
         detected = await identify_foods(image_bytes, mime_type=mime, **extras)
     except Exception as exc:  # noqa: BLE001
         # Log the detail, return something that doesn't leak upstream keys
@@ -109,6 +113,10 @@ async def estimate_photo(
     # Macros are filled in here, in parallel, instead of the client making one
     # /foods/search round-trip per detected food over a mobile connection.
     foods = await enrich_detected_foods(detected)
+    for food in foods:
+        local = food.pop("local_name", None)
+        if local:
+            food["display_name"] = local
     usda_done = time.monotonic()
 
     # A dish the database has no entry for (a regional stew, street food) gets
@@ -121,7 +129,7 @@ async def estimate_photo(
     unmatched = [f for f in foods if not f.get("matched")]
     estimated = 0
     if unmatched:
-        estimates = await estimate_foods([f["name"] for f in unmatched], region)
+        estimates = await estimate_foods([f["name"] for f in unmatched], region, **({"lang": lang} if lang != "en" else {}))
         for food in unmatched:
             found = estimates.get(food["name"])
             if found is None:
