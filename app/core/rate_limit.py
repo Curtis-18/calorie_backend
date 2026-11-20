@@ -55,3 +55,5 @@ people_searches = RateLimit(60, 60)
 messages_sent = RateLimit(60, 60)
 # Every coach turn is a paid Gemini call. A daily free allowance joins this in P6.
 coach_turns = RateLimit(20, 3600)
+# "Send me a test notification" in Settings.
+push_tests = RateLimit(5, 3600)

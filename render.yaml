@@ -44,3 +44,12 @@ services:
       # Any long random string; lets a scheduler call POST /snaps/purge.
       - key: CRON_SECRET
         sync: false
+      # Browser push notifications. Make the pair with
+      # `python scripts/generate_vapid_keys.py`; the private key is a secret.
+      # Set PUSH_MODE to "web" to switch delivery on (it is "dry_run" otherwise).
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: PUSH_MODE
+        sync: false

@@ -33,7 +33,11 @@ class PrefsIn(BaseModel):
     pause_days: int | None = Field(None, ge=0, le=14)
 
 
+class DeviceRemoveIn(BaseModel):
+    token: str = Field(..., min_length=16, max_length=4096)
+
+
 class DeviceIn(BaseModel):
     token: str = Field(..., min_length=16, max_length=4096)
-    platform: Literal["ios", "android"]
+    platform: Literal["ios", "android", "web"]
     utc_offset_minutes: int | None = Field(None, ge=-840, le=840)

@@ -63,9 +63,15 @@ class Settings(BaseSettings):
     cron_secret: str | None = None
 
     # How push notifications are delivered. "dry_run" (the default) records what
-    # would be sent in notification_log and sends nothing; real delivery needs
-    # the Apple/Firebase credentials and a provider added in push_sender.py.
+    # would be sent in notification_log and sends nothing. "web" sends to
+    # browsers that allowed notifications (Web Push, signed with the VAPID keys
+    # below; see scripts/generate_vapid_keys.py). Phones (APNs/FCM) need an
+    # Apple/Firebase provider that does not exist yet.
     push_mode: str = "dry_run"
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""  # a secret: set in the Render dashboard only
+    # Who is sending, as push services ask. A web address, never a person's email.
+    vapid_subject: str = "https://calorie-backend-odc3.onrender.com"
     push_daily_cap: int = 3
 
     # Ceiling for the base64 photo payload on /estimate-photo.

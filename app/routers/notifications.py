@@ -10,11 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.language import get_language
+from app.core.rate_limit import push_tests
 from app.core.security import get_current_user_id
+from app.i18n import t
 from app.models.friendship import Friendship
 from app.models.notification import DeviceToken, NotificationLog, NotificationPrefs
 from app.models.user import Profile
-from app.schemas.notifications import DeviceIn, PrefsIn, PrefsOut
+from app.schemas.notifications import DeviceIn, DeviceRemoveIn, PrefsIn, PrefsOut
 from app.models.food_log import FoodLog
 from app.services.notification_rules import (
     LOG_REMINDER_WINDOW,
@@ -27,6 +30,7 @@ from app.services.notification_rules import (
     pick_streak_to_save,
 )
 from app.services.progress_service import LogRow, compute_progress
+from app.services import push_sender
 from app.services.notifier import notify, prefs_from_row
 from app.services.snap_streaks import streaks_with
 
@@ -99,6 +103,8 @@ async def register_device(
     """Remember this phone's push token. A token that was on another account
     moves to this one, so signing out and in as someone else can't leave the
     old person getting the new person's notifications."""
+    if data.platform == "web" and push_sender.parse_subscription(data.token) is None:
+        raise HTTPException(status_code=422, detail="That isn't a valid browser notification subscription.")
     now = datetime.now(timezone.utc)
     stmt = pg_insert(DeviceToken).values(token=data.token, user_id=user_id, platform=data.platform, last_seen=now)
     await db.execute(
@@ -130,6 +136,52 @@ async def remove_device(
     await db.execute(delete(DeviceToken).where(DeviceToken.token == token, DeviceToken.user_id == user_id))
     await db.commit()
     return None
+
+
+@router.post("/devices/remove", status_code=204)
+async def remove_device_by_body(
+    data: DeviceRemoveIn,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Like DELETE /devices/{token}, for a browser subscription, which is long
+    JSON text and does not belong in a URL."""
+    await db.execute(delete(DeviceToken).where(DeviceToken.token == data.token, DeviceToken.user_id == user_id))
+    await db.commit()
+    return None
+
+
+@router.get("/web-push")
+async def web_push_info(user_id: uuid.UUID = Depends(get_current_user_id)):
+    """Whether browsers can be notified, and the public key a browser needs to
+    subscribe. The key is not a secret; the app asks here so it needs no
+    rebuild when the keys are set or changed."""
+    ready = push_sender.web_push_ready()
+    return {"enabled": ready, "public_key": settings.vapid_public_key if ready else None}
+
+
+TEST_TITLE = "Notifications are on 🔔"
+TEST_BODY = "This is a test. You'll get friends' bites and gentle reminders here, never more than a few a day."
+
+
+@router.post("/test")
+async def send_test(
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+    lang: str = Depends(get_language),
+):
+    """Send yourself one notification now, to check this device is set up.
+    Skips quiet hours and the daily cap (you asked for it) and is not logged."""
+    push_tests.check("push_test", user_id, "That's enough tests for now. Try again in a while.")
+    tokens = list((await db.execute(select(DeviceToken.token).where(DeviceToken.user_id == user_id))).scalars().all())
+    if not tokens:
+        return {"status": "no_device"}
+    try:
+        status = await push_sender.send(tokens, t(lang, TEST_TITLE), t(lang, TEST_BODY), {"kind": "test"})
+    except Exception:  # noqa: BLE001
+        log.exception("test push failed")
+        status = "failed"
+    return {"status": status}
 
 
 async def _logging_state(db: AsyncSession, uid: uuid.UUID, today) -> tuple[int, bool]:
