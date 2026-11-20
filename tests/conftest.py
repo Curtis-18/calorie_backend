@@ -91,3 +91,15 @@ def no_open_food_facts(monkeypatch):
         return None
 
     monkeypatch.setattr(foods, "lookup_off_barcode", nothing)
+
+
+@pytest.fixture(autouse=True)
+def no_dish_estimates(monkeypatch):
+    """No test reaches Gemini through the dish-estimate step of a scan. Tests
+    of that step replace this again."""
+    from app.routers import photo_estimation
+
+    async def nothing(names, region=None):
+        return {}
+
+    monkeypatch.setattr(photo_estimation, "estimate_foods", nothing)

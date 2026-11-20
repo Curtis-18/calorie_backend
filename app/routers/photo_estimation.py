@@ -14,7 +14,9 @@ from app.core.features import Feature, record_usage, require_feature
 from app.core.rate_limit import photo_scans
 from app.core.security import get_current_user_id
 from app.models.photo import EstimatedFood
+from app.services.estimates import estimate_foods
 from app.services.gemini_service import identify_foods
+from app.services.regions import is_region
 from app.services.usda_service import enrich_detected_foods
 
 log = logging.getLogger("calorie_backend")
@@ -51,6 +53,10 @@ class PhotoRequest(BaseModel):
     # What the person said about the meal (speech turned into text on their
     # phone). Short, and passed to the model as data, never as instructions.
     note: str | None = Field(None, max_length=300)
+    # Where the person mostly eats (a key from services/regions.py), sent by
+    # the app so no database lookup delays the scan. Context for naming dishes
+    # only; an unknown value is ignored.
+    region: str | None = Field(None, max_length=40)
 
 
 @router.post("", response_model=list[EstimatedFood])
@@ -82,12 +88,16 @@ async def estimate_photo(
     # log before anything is changed (handover: PRODUCT ROADMAP P0.2). Only
     # numbers: no food names, nothing about the person beyond the log's own id.
     started = time.monotonic()
+    region = request.region if request.region and is_region(request.region) else None
     try:
         mime = sniff_image_mime(image_bytes)
         note = (request.note or "").strip()
-        detected = await (
-            identify_foods(image_bytes, mime_type=mime, note=note) if note else identify_foods(image_bytes, mime_type=mime)
-        )
+        extras = {}
+        if note:
+            extras["note"] = note
+        if region:
+            extras["region"] = region
+        detected = await identify_foods(image_bytes, mime_type=mime, **extras)
     except Exception as exc:  # noqa: BLE001
         # Log the detail, return something that doesn't leak upstream keys
         # or internal URLs to the client.
@@ -99,12 +109,39 @@ async def estimate_photo(
     # Macros are filled in here, in parallel, instead of the client making one
     # /foods/search round-trip per detected food over a mobile connection.
     foods = await enrich_detected_foods(detected)
+    usda_done = time.monotonic()
+
+    # A dish the database has no entry for (a regional stew, street food) gets
+    # a typical value with its basis stated, so it can still be logged. Only
+    # unmatched items cost this extra call; the photo is not sent again. Any
+    # failure just leaves them unmatched, as before.
+    for food in foods:
+        if food.get("matched"):
+            food["source"], food["confidence"] = "usda", "high"
+    unmatched = [f for f in foods if not f.get("matched")]
+    estimated = 0
+    if unmatched:
+        estimates = await estimate_foods([f["name"] for f in unmatched], region)
+        for food in unmatched:
+            found = estimates.get(food["name"])
+            if found is None:
+                continue
+            food.update(
+                calories_per_100g=found["calories_per_100g"],
+                protein_g_per_100g=found["protein_g_per_100g"],
+                carbs_g_per_100g=found["carbs_g_per_100g"],
+                fat_g_per_100g=found["fat_g_per_100g"],
+                source="ai_estimate",
+                confidence="medium",
+                estimate_basis=found["basis"],
+            )
+            estimated += 1
     finished = time.monotonic()
     matched = sum(1 for f in foods if f.get("matched"))
     log.info(
-        "scan_done status=ok ms_total=%d ms_gemini=%d ms_usda=%d items=%d matched=%d",
-        (finished - started) * 1000, (gemini_done - started) * 1000, (finished - gemini_done) * 1000,
-        len(foods), matched,
+        "scan_done status=ok ms_total=%d ms_gemini=%d ms_usda=%d ms_estimate=%d items=%d matched=%d estimated=%d",
+        (finished - started) * 1000, (gemini_done - started) * 1000, (usda_done - gemini_done) * 1000,
+        (finished - usda_done) * 1000, len(foods), matched, estimated,
     )
     background.add_task(record_usage, user_id, Feature.PHOTO_SCAN, day)
     return foods

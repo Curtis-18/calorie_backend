@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.models.food_log import FoodLog
+from app.models.food_log_estimate import FoodLogEstimate
 from app.models.food_log_nutrients import FoodLogNutrients
 from app.schemas.food_log import FoodLogIn, FoodLogOut, FoodLogUpdate
 
@@ -58,7 +59,44 @@ async def _write_nutrients(db: AsyncSession, log_id: str, known: dict[str, float
         log.warning("could not save food log nutrients", exc_info=True)
 
 
-def _out(entry: FoodLog, nutrients: dict | None) -> dict:
+async def _load_estimates(db: AsyncSession, entries: list[FoodLog]) -> dict[str, str]:
+    """Which of these entries are estimates, and why. Only photo entries can be
+    (a scan is the only source of them), so a day with none costs no query.
+    In a savepoint, and any failure just means no marks."""
+    log_ids = [e.id for e in entries if e.source == "photo"]
+    if not log_ids:
+        return {}
+    try:
+        async with db.begin_nested():
+            rows = (
+                await db.execute(
+                    select(FoodLogEstimate.log_id, FoodLogEstimate.basis).where(FoodLogEstimate.log_id.in_(log_ids))
+                )
+            ).all()
+        return {log_id: basis for log_id, basis in rows if basis}
+    except Exception:  # noqa: BLE001
+        log.warning("could not read food log estimates", exc_info=True)
+        return {}
+
+
+async def _write_estimate(db: AsyncSession, log_id: str, basis: str | None) -> None:
+    """Mark an entry as an estimate, or clear the mark. Commits nothing."""
+    basis = " ".join((basis or "").split())
+    try:
+        async with db.begin_nested():
+            if basis:
+                await db.execute(
+                    pg_insert(FoodLogEstimate)
+                    .values(log_id=log_id, basis=basis)
+                    .on_conflict_do_update(index_elements=["log_id"], set_={"basis": basis})
+                )
+            else:
+                await db.execute(delete(FoodLogEstimate).where(FoodLogEstimate.log_id == log_id))
+    except Exception:  # noqa: BLE001
+        log.warning("could not save food log estimate", exc_info=True)
+
+
+def _out(entry: FoodLog, nutrients: dict | None, estimate_basis: str | None = None) -> dict:
     return {
         "id": entry.id,
         "name": entry.name,
@@ -71,22 +109,28 @@ def _out(entry: FoodLog, nutrients: dict | None) -> dict:
         "timestamp": entry.timestamp,
         "log_date": entry.log_date,
         "nutrients": nutrients or None,
+        "estimate_basis": estimate_basis,
     }
 
 
-async def _store_new_nutrients(db: AsyncSession, data: FoodLogIn) -> dict | None:
-    """After the entry itself is safely saved. Returns what is now stored."""
+async def _store_new_nutrients(db: AsyncSession, data: FoodLogIn) -> tuple[dict | None, str | None]:
+    """After the entry itself is safely saved. Returns the nutrients and the
+    estimate basis that are now stored (None for either when there is none)."""
     known = data.nutrients.known() if data.nutrients else None
-    if not known:
-        return None
-    await _write_nutrients(db, data.id, known)
+    basis = " ".join((data.estimate_basis or "").split()) or None
+    if not known and not basis:
+        return None, None
+    if known:
+        await _write_nutrients(db, data.id, known)
+    if basis:
+        await _write_estimate(db, data.id, basis)
     try:
         await db.commit()
     except Exception:  # noqa: BLE001
         await db.rollback()
         log.warning("could not commit food log nutrients", exc_info=True)
-        return None
-    return known
+        return None, None
+    return known, basis
 
 
 @router.post("", response_model=FoodLogOut, status_code=201)
@@ -123,7 +167,7 @@ async def create_log(
         if existing is not None and existing.user_id == user_id:
             response.status_code = 200
             # The first attempt may have saved the entry but not its nutrients.
-            return _out(existing, await _store_new_nutrients(db, data))
+            return _out(existing, *await _store_new_nutrients(db, data))
         if existing is not None:
             raise HTTPException(status_code=409, detail="Log with this id already exists")
         # Not a duplicate id, so some other constraint failed. Previously every
@@ -139,7 +183,7 @@ async def create_log(
         log.exception("food log insert failed")
         raise HTTPException(status_code=500, detail="Could not save this entry")
     await db.refresh(entry)
-    return _out(entry, await _store_new_nutrients(db, data))
+    return _out(entry, *await _store_new_nutrients(db, data))
 
 
 @router.get("/today", response_model=list[FoodLogOut])
@@ -153,7 +197,8 @@ async def get_today_logs(
     )
     entries = list(result.scalars().all())
     nutrients = await _load_nutrients(db, [e.id for e in entries])
-    return [_out(e, nutrients.get(e.id)) for e in entries]
+    estimates = await _load_estimates(db, entries)
+    return [_out(e, nutrients.get(e.id), estimates.get(e.id)) for e in entries]
 
 
 # `:path` because the id is chosen by the app and older builds put the food
@@ -175,7 +220,7 @@ async def update_log(
 
     # A field sent as null means "not changing it", the same as leaving it out.
     changes = {
-        k: v for k, v in data.model_dump(exclude_unset=True, exclude={"nutrients"}).items() if v is not None
+        k: v for k, v in data.model_dump(exclude_unset=True, exclude={"nutrients", "estimate_basis"}).items() if v is not None
     }
     if "name" in changes:
         changes["name"] = changes["name"].strip()
@@ -185,6 +230,8 @@ async def update_log(
         setattr(entry, field, value)
     if "nutrients" in data.model_fields_set:
         await _write_nutrients(db, log_id, data.nutrients.known() if data.nutrients else None)
+    if "estimate_basis" in data.model_fields_set:
+        await _write_estimate(db, log_id, data.estimate_basis)
     try:
         await db.commit()
     except Exception:
@@ -193,7 +240,11 @@ async def update_log(
         # error instead of "Failed to fetch".
         log.exception("food log update failed")
         raise HTTPException(status_code=500, detail="Could not save this change")
-    return _out(entry, (await _load_nutrients(db, [log_id])).get(log_id))
+    return _out(
+        entry,
+        (await _load_nutrients(db, [log_id])).get(log_id),
+        (await _load_estimates(db, [entry])).get(log_id),
+    )
 
 
 @router.delete("/{log_id:path}", status_code=204)

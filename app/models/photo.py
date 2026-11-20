@@ -19,6 +19,13 @@ class EstimatedFood(BaseModel):
     added: list[str] | None = None
     note_applied: str | None = None
     matched: bool = False
+    # Where the numbers come from: "usda" (a database match, confidence high)
+    # or "ai_estimate" (no match; a typical value, confidence medium, with the
+    # basis in words). `matched` stays False for an estimate so older apps,
+    # which can't save unmatched items, are unaffected.
+    source: str | None = None
+    confidence: str | None = None
+    estimate_basis: str | None = None
     # What the name was matched to, so the app can show it and let the user
     # correct a wrong match. Both None when unmatched.
     matched_description: str | None = None

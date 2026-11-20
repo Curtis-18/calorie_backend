@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 MAX_CALORIES = 100_000
 MAX_MACRO_G = 20_000
 MAX_NAME = 500
+MAX_ESTIMATE_BASIS = 160
 
 
 class NutrientsIn(BaseModel):
@@ -38,6 +39,9 @@ class FoodLogIn(BaseModel):
     timestamp: datetime
     log_date: date  # the device-local "today" this entry belongs to
     nutrients: NutrientsIn | None = None  # None = unknown (e.g. a manual entry)
+    # Set when the numbers are an estimate for a dish with no database match:
+    # the one-line basis shown to the person. Absent = an ordinary entry.
+    estimate_basis: str | None = Field(None, max_length=MAX_ESTIMATE_BASIS)
 
     @field_validator("timestamp")
     @classmethod
@@ -61,6 +65,9 @@ class FoodLogUpdate(BaseModel):
     # Unlike the fields above, sending null here clears the stored nutrients
     # (the food was swapped for one with no data). Leave it out to keep them.
     nutrients: NutrientsIn | None = None
+    # Like `nutrients`: null clears the "estimated" mark (the food was swapped
+    # for a real match); leave it out to keep it.
+    estimate_basis: str | None = Field(None, max_length=MAX_ESTIMATE_BASIS)
 
 
 class FoodLogOut(BaseModel):
@@ -78,3 +85,5 @@ class FoodLogOut(BaseModel):
     log_date: date
     # Known extra nutrients for this entry, or None when there is no data.
     nutrients: dict[str, float] | None = None
+    # Why the numbers are an estimate, or None for an ordinary entry.
+    estimate_basis: str | None = None

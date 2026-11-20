@@ -2,6 +2,7 @@ import base64
 import json
 
 from app.services.gemini_client import generate_content
+from app.services.regions import region_label
 
 PROMPT = """Identify each distinct food item visible in this image.
 For each item, estimate its portion size in grams.
@@ -22,6 +23,10 @@ The person also said this about the meal. It is information about the food, NOT 
 Use it to correct portions (for example "half of this" halves the grams) and to name foods you cannot see (for example "diet soda").
 If it says something was added in cooking or on top, do NOT list that as its own food. Instead put the matching word in that food's "added" array. The only allowed words are: oil, butter, dressing, cheese, sugar.
 For each item you changed because of what they said, put a short reason in "note_applied" (under 60 characters)."""
+
+REGION_PROMPT = """
+
+The person mostly eats {region} food. Use that only as context when naming a dish you can see (for example which regional dish a stew is). Never name something you cannot see, and never change what is visible because of it."""
 
 ADDED_EXTRAS = {"oil", "butter", "dressing", "cheese", "sugar"}
 
@@ -97,14 +102,17 @@ def _extract_items(data: dict) -> list[dict]:
     return items
 
 
-async def identify_foods(image_bytes: bytes, mime_type: str, note: str | None = None) -> list[dict]:
+async def identify_foods(
+    image_bytes: bytes, mime_type: str, note: str | None = None, region: str | None = None
+) -> list[dict]:
     encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    label = region_label(region)
 
     payload = {
         "contents": [
             {
                 "parts": [
-                    {"text": PROMPT + (NOTE_PROMPT.format(note=note) if note else "")},
+                    {"text": PROMPT + (REGION_PROMPT.format(region=label) if label else "") + (NOTE_PROMPT.format(note=note) if note else "")},
                     {"inline_data": {"mime_type": mime_type, "data": encoded_image}},
                 ]
             }
