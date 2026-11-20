@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import date as date_type, datetime, timezone
+from datetime import date as date_type, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -22,6 +22,9 @@ from app.services.insights_service import (
 log = logging.getLogger("calorie_backend")
 
 router = APIRouter(prefix="/insights", tags=["insights"])
+
+# How long a narrative is reused after the day's logs change underneath it.
+NARRATIVE_MAX_AGE = timedelta(hours=3)
 
 
 def _utcnow_naive() -> datetime:
@@ -54,20 +57,19 @@ async def get_insights(
     )
     cached = result.scalar_one_or_none()
     # The trend is our own data and cheap, so it is always computed fresh. The
-    # cached narrative is only reused while the logs behind it are unchanged:
-    # it used to be served all day, so a meal logged after the first visit
-    # still showed "you haven't logged any meals today".
+    # narrative is a paid Gemini call, so it is only regenerated when there is
+    # no cache for today, the person pulls to refresh, or the logs changed and
+    # the cached text is at least NARRATIVE_MAX_AGE old. Before that, every
+    # logged food caused a Gemini call (the app reloads after each change). In
+    # between, the cached text is served with the live chart.
     trend = await get_weekly_trend(db, user_id, today)
-    if (
-        not refresh
-        and cached
-        and cached.date == today
-        and cached.payload
-        and cached.payload.get("weekly_trend") == trend
-    ):
-        return InsightsOut(
-            **cached.payload, generated_at=_as_utc(cached.generated_at)
-        )
+    if not refresh and cached and cached.date == today and cached.payload:
+        unchanged = cached.payload.get("weekly_trend") == trend
+        age = _utcnow_naive() - _as_utc(cached.generated_at).replace(tzinfo=None)
+        if unchanged or age < NARRATIVE_MAX_AGE:
+            payload = dict(cached.payload)
+            payload["weekly_trend"] = trend
+            return InsightsOut(**payload, generated_at=_as_utc(cached.generated_at))
 
     try:
         # Each generation is a paid Gemini call, and `refresh=true` forces one.

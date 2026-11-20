@@ -224,3 +224,77 @@ async def test_insights_use_the_device_date_for_trend_prompt_and_cache(monkeypat
 def test_insights_rejects_an_implausible_date_over_http(client):
     r = client.get("/insights", params={"date": "2001-01-01"})
     assert r.status_code == 422
+
+
+async def test_logging_a_food_does_not_call_gemini_while_the_narrative_is_fresh(monkeypatch):
+    """The app reloads Insights after every logged food; that used to be one
+    paid call each. Now the cached text is served with the live chart."""
+    from datetime import timedelta
+
+    fresh = _trend()
+    fresh[-1] = {**fresh[-1], "calories": 450}
+
+    async def new_trend(db, user_id, today):
+        return fresh
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("must not call Gemini")
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", new_trend)
+    monkeypatch.setattr(insights_router, "generate_insights", boom)
+
+    class Cached:
+        date = datetime.now(timezone.utc).date()
+        payload = {"narrative": "earlier text", "tips": ["t"], "weekly_trend": _trend()}
+        generated_at = _utcnow_naive() - timedelta(minutes=20)
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return Cached()
+
+    class FakeDb:
+        async def execute(self, stmt):
+            return _Result()
+
+    out = await insights_router.get_insights(refresh=False, user_id=uuid.uuid4(), db=FakeDb())
+    assert out.narrative == "earlier text"
+    assert out.weekly_trend[-1].calories == 450  # the chart is live
+
+
+async def test_a_pull_to_refresh_still_regenerates_a_fresh_narrative(monkeypatch):
+    from datetime import timedelta
+
+    called = []
+
+    async def trend(db, user_id, today):
+        return _trend()
+
+    async def new_insights(db, user_id, t, today):
+        called.append(1)
+        return {"narrative": "new", "tips": [], "weekly_trend": t}
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", trend)
+    monkeypatch.setattr(insights_router, "generate_insights", new_insights)
+    insights_router.insight_generations.reset()
+
+    class Cached:
+        date = datetime.now(timezone.utc).date()
+        payload = {"narrative": "old", "tips": [], "weekly_trend": _trend()}
+        generated_at = _utcnow_naive() - timedelta(minutes=5)
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return Cached()
+
+    class FakeDb:
+        async def execute(self, stmt):
+            return _Result()
+
+        async def commit(self):
+            pass
+
+        async def rollback(self):
+            pass
+
+    out = await insights_router.get_insights(refresh=True, user_id=uuid.uuid4(), db=FakeDb())
+    assert called and out.narrative == "new"
