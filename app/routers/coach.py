@@ -27,7 +27,7 @@ from app.models.recipe import Recipe
 from app.models.target import Target
 from app.models.user_prefs import UserPrefs
 from app.routers.budget import _load_prefs as load_budget_prefs
-from app.services import coach_prompt, coach_service
+from app.services import coach_prompt, coach_service, meal_swaps, workouts
 from app.services.insights_service import get_weekly_trend
 from app.services.regions import region_label
 from app.services.target_calculator import MIN_CALORIES
@@ -56,11 +56,52 @@ class CoachMessageIn(BaseModel):
         return v
 
 
+class CoachSuggestion(BaseModel):
+    """One of the person's own recipes the coach named, with its numbers per
+    serving read from the database (never from the model's words)."""
+
+    recipe_id: uuid.UUID
+    title: str
+    calories: int
+    protein_g: int
+    carbs_g: int
+    fat_g: int
+
+
+class WorkoutStep(BaseModel):
+    name: str
+    cue: str
+    amount: str
+
+
+class WorkoutSection(BaseModel):
+    title: str
+    repeat: str | None = None
+    steps: list[WorkoutStep]
+
+
+class CoachWorkout(BaseModel):
+    """A routine from the curated library (services/workouts.py), written in the
+    person's language. The coach only names it; it never writes the moves."""
+
+    id: str
+    name: str
+    duration: str
+    focus: str
+    summary: str
+    sections: list[WorkoutSection]
+    safety: str
+
+
 class CoachMessageOut(BaseModel):
     id: uuid.UUID
     role: str
     body: str
     created_at: datetime
+    # Only on the answer just given. They are not stored, so a reloaded thread
+    # shows the same words without the buttons.
+    suggestions: list[CoachSuggestion] = []
+    workouts: list[CoachWorkout] = []
 
 
 class CoachThreadOut(BaseModel):
@@ -68,8 +109,19 @@ class CoachThreadOut(BaseModel):
     has_more: bool = False
 
 
-def _out(m: CoachMessage) -> CoachMessageOut:
-    return CoachMessageOut(id=m.id, role=m.role, body=m.body, created_at=m.created_at)
+def _out(
+    m: CoachMessage, suggestions: list[dict] | None = None, routines: list[dict] | None = None
+) -> CoachMessageOut:
+    return CoachMessageOut(
+        id=m.id, role=m.role, body=m.body, created_at=m.created_at, workouts=routines or [],
+        suggestions=[
+            CoachSuggestion(
+                recipe_id=r["id"], title=r["title"], calories=r["calories"],
+                protein_g=r["protein_g"], carbs_g=r["carbs_g"], fat_g=r["fat_g"],
+            )
+            for r in suggestions or []
+        ],
+    )
 
 
 def _now() -> datetime:
@@ -83,7 +135,11 @@ async def _target(db: AsyncSession, user_id: uuid.UUID) -> Target:
     return target
 
 
-async def _build_context(db: AsyncSession, user_id: uuid.UUID, target: Target, today: date_type) -> str:
+async def _build_context(
+    db: AsyncSession, user_id: uuid.UUID, target: Target, today: date_type, lang: str = "en"
+) -> tuple[str, list[dict]]:
+    """The text the coach is told, and the person's recipes (with ids) that the
+    answer may name."""
     floor = MIN_CALORIES[target.sex]
     entries = (
         await db.execute(
@@ -132,14 +188,18 @@ async def _build_context(db: AsyncSession, user_id: uuid.UUID, target: Target, t
                 )
             ).scalars().all()
             recipes = [
-                {"title": r.title, "calories": r.calories_per_serving, "protein_g": round(r.protein_g or 0),
+                {"id": r.id, "title": r.title, "calories": r.calories_per_serving, "protein_g": round(r.protein_g or 0),
                  "carbs_g": round(r.carbs_g or 0), "fat_g": round(r.fat_g or 0)}
                 for r in found
             ]
     except Exception:  # noqa: BLE001
         log.warning("coach context: region or recipes unavailable", exc_info=True)
 
-    return coach_prompt.build_context(
+    left_kcal = max(0, (allowance or target.calorie_target) - int(totals["calories"]))
+    left_protein = max(0, target.protein_g - round(totals["protein_g"]))
+    best_fits = meal_swaps.rank_fits(recipes, left_kcal, left_protein)
+
+    context = coach_prompt.build_context(
         goal=target.goal, calorie_target=target.calorie_target, floor=floor,
         protein_g=target.protein_g, carbs_g=target.carbs_g, fat_g=target.fat_g,
         today_entries=[
@@ -147,7 +207,9 @@ async def _build_context(db: AsyncSession, user_id: uuid.UUID, target: Target, t
             for e in entries
         ],
         today_totals=totals, allowance_today=allowance, week=week, region=region, recipes=recipes,
+        best_fits=best_fits, routines=workouts.names(lang),
     )
+    return context, recipes
 
 
 async def _history(db: AsyncSession, user_id: uuid.UUID, before_id: uuid.UUID) -> list[tuple[str, str]]:
@@ -217,12 +279,13 @@ async def send_message(
 
     floor = MIN_CALORIES[target.sex]
     from_model = False
+    recipes: list[dict] = []
     tokens_in = tokens_out = None
     if coach_prompt.needs_care(data.text):
         log.info("coach_care_reply")
         reply = coach_service.care_reply(lang)
     else:
-        context = await _build_context(db, user_id, target, today)
+        context, recipes = await _build_context(db, user_id, target, today, lang)
         history = await _history(db, user_id, data.id)
         try:
             reply, tokens_in, tokens_out, from_model = await coach_service.reply_to(
@@ -247,7 +310,11 @@ async def send_message(
     if from_model:
         background.add_task(record_usage, user_id, Feature.COACH_CHAT, today)
     await _forget_old(db, user_id)
-    return _out(stored)
+    # Buttons only for an answer the model wrote, and only for recipes it named.
+    named = meal_swaps.named_in(reply, recipes) if from_model else []
+    # One routine at most, and only one whose exact name the reply uses.
+    routine = meal_swaps.named_in(reply, workouts.names(lang), limit=1) if from_model else []
+    return _out(stored, named, [workouts.render(workouts.get(r["id"]), lang) for r in routine])
 
 
 async def _forget_old(db: AsyncSession, user_id: uuid.UUID) -> None:

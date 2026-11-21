@@ -11,7 +11,7 @@ import pytest
 from app.i18n import SUPPORTED, TABLES
 from app.models.coach_message import CoachMessage
 from app.routers import coach as router
-from app.services import coach_prompt, coach_service
+from app.services import coach_prompt, coach_service, meal_swaps
 from app.services.coach_prompt import (
     CARE_REPLY, SAFE_FALLBACK, build_context, needs_care, reply_problem, system_prompt, wrap_user_text,
 )
@@ -19,6 +19,8 @@ from app.services.coach_prompt import (
 ME = uuid.UUID("00000000-0000-0000-0000-000000000001")
 OTHER = uuid.UUID("00000000-0000-0000-0000-000000000009")
 T0 = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+STEW = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
+RICE = uuid.UUID("00000000-0000-0000-0000-0000000000a2")
 
 
 # ---- what a person writes ----------------------------------------------------------------------------
@@ -226,8 +228,13 @@ def setup(monkeypatch):
     async def target(db_, user_id):
         return SimpleNamespace(sex="female", goal="lose", calorie_target=1800, protein_g=120, carbs_g=180, fat_g=60)
 
-    async def context(db_, user_id, target_, today):
-        return "CONTEXT"
+    recipes = [
+        {"id": STEW, "title": "Lentil stew", "calories": 420, "protein_g": 25, "carbs_g": 50, "fat_g": 9},
+        {"id": RICE, "title": "Rice", "calories": 300, "protein_g": 6, "carbs_g": 60, "fat_g": 1},
+    ]
+
+    async def context(db_, user_id, target_, today, lang="en"):
+        return "CONTEXT", recipes
 
     async def fake_db():
         yield db
@@ -410,7 +417,7 @@ async def test_the_context_query_never_touches_profiles_or_friends():
             return R()
 
     target = SimpleNamespace(sex="male", goal="gain", calorie_target=2600, protein_g=160, carbs_g=300, fat_g=80)
-    ctx = await router._build_context(Db(), ME, target, date(2026, 11, 20))
+    ctx, _recipes = await router._build_context(Db(), ME, target, date(2026, 11, 20))
     assert "1500 kcal" in ctx and "Nothing logged today yet." in ctx
     joined = " ".join(seen).lower()
     assert "profiles" not in joined and "friendships" not in joined and "email" not in joined and "username" not in joined
@@ -428,3 +435,123 @@ def test_coach_history_goes_with_the_account_and_the_migration_is_safe_to_rerun(
 def test_old_history_is_forgotten_after_ninety_days(client, setup):
     assert router.RETENTION_DAYS == 90
     send(client, "hi")  # the cleanup runs after an answer and must not break the reply
+
+
+# ---- step 4b: meal swaps from the person's own recipes -------------------------------------------------------
+
+def _r(title, calories, protein, rid=None):
+    return {"id": rid or uuid.uuid4(), "title": title, "calories": calories, "protein_g": protein, "carbs_g": 0, "fat_g": 0}
+
+
+def test_only_recipes_that_fit_what_is_left_are_ranked():
+    recipes = [_r("Big pasta", 900, 30), _r("Chicken bowl", 500, 45), _r("Fruit", 120, 2), _r("Soup", 300, 12)]
+    best = meal_swaps.rank_fits(recipes, left_kcal=600, left_protein=50)
+    assert [r["title"] for r in best] == ["Chicken bowl", "Soup", "Fruit"]  # the 900 never fits in 600
+
+
+def test_the_best_fit_covers_the_protein_still_wanted_and_uses_the_room():
+    recipes = [_r("Light", 200, 5), _r("Solid", 480, 40), _r("Okay", 450, 15)]
+    assert meal_swaps.rank_fits(recipes, left_kcal=500, left_protein=40)[0]["title"] == "Solid"
+    # With no protein left to cover, the one that uses the room best wins.
+    assert meal_swaps.rank_fits(recipes, left_kcal=500, left_protein=0)[0]["title"] == "Solid"
+
+
+def test_no_room_means_no_suggestions_and_ties_are_stable():
+    assert meal_swaps.rank_fits([_r("Soup", 50, 2)], left_kcal=80, left_protein=10) == []
+    assert meal_swaps.rank_fits([_r("Soup", 200, 2)], left_kcal=0, left_protein=0) == []
+    twins = [_r("B soup", 300, 10), _r("A soup", 300, 10)]
+    assert [r["title"] for r in meal_swaps.rank_fits(twins, 400, 20)] == ["A soup", "B soup"]
+    assert meal_swaps.rank_fits(twins, 400, 20, limit=1)[0]["title"] == "A soup"
+
+
+def test_a_recipe_is_named_only_by_its_whole_title_in_order_of_mention():
+    stew, rice, pie = _r("Lentil stew", 420, 25), _r("Rice", 300, 6), _r("Egg pie", 350, 20)
+    reply = "Try the pie? Egg pie is light. Or your LENTIL STEW with rice, but not the price."
+    assert [r["title"] for r in meal_swaps.named_in(reply, [stew, rice, pie])] == ["Egg pie", "Lentil stew", "Rice"]
+    assert meal_swaps.named_in("That costs a fair price.", [rice]) == []  # "Rice" is not inside "price"
+    assert meal_swaps.named_in("Mmm, Ab is nice", [_r("Ab", 100, 1)]) == []  # too short to match safely
+    assert len(meal_swaps.named_in("a b c", [_r(x, 1, 1) for x in "abc"])) == 0
+    many = [_r(f"Dish {n}", 100, 1) for n in range(6)]
+    assert len(meal_swaps.named_in(" ".join(r["title"] for r in many), many)) == 3
+
+
+def test_a_title_with_punctuation_is_matched_literally():
+    odd = _r("Mum's (spicy) stew", 400, 20)
+    assert meal_swaps.named_in("Make Mum's (spicy) stew tonight.", [odd]) == [odd]
+    assert meal_swaps.named_in("Make Mums spicy stew tonight.", [odd]) == []
+
+
+def test_the_context_lists_the_best_fits_and_the_prompt_says_to_use_exact_titles():
+    ctx = build_context(
+        goal="maintain", calorie_target=2000, floor=1500, protein_g=100, carbs_g=250, fat_g=70, today_entries=[],
+        today_totals={"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}, allowance_today=None, week=[], region=None,
+        recipes=[{"title": "Lentil stew", "calories": 420, "protein_g": 25, "carbs_g": 50, "fat_g": 9}],
+        best_fits=[{"title": "Lentil stew"}],
+    )
+    assert "Fits what is left today (ranked by the app, best first):\n- Lentil stew" in ctx
+    assert "exact title" in system_prompt(ctx, "en")
+
+
+def test_a_reply_that_names_a_recipe_comes_with_a_log_button_with_the_databases_numbers(client, setup):
+    setup.gemini.replies = ["Your lentil stew is a great fit, around 9999 calories of comfort."]
+    body = send(client, "what should I eat?").json()
+    assert body["suggestions"] == [
+        {"recipe_id": str(STEW), "title": "Lentil stew", "calories": 420, "protein_g": 25, "carbs_g": 50, "fat_g": 9}
+    ]  # the numbers come from the recipe, not from the model's sentence
+
+
+def test_a_reply_that_names_nothing_has_no_buttons_and_old_clients_are_unaffected(client, setup):
+    setup.gemini.replies = ["A bowl of yogurt with fruit would be lovely."]
+    body = send(client, "snack?").json()
+    assert body["suggestions"] == [] and set(body) >= {"id", "role", "body", "created_at"}
+
+
+def test_fixed_replies_never_carry_buttons(client, setup):
+    assert send(client, "I make myself sick after meals").json()["suggestions"] == []
+    setup.gemini.replies = ["Burn it off with the lentil stew!", "Try the Lentil stew; a day over is just a day."]
+    first = send(client, "I ate too much")
+    assert first.json()["suggestions"][0]["title"] == "Lentil stew"  # the second, acceptable, answer
+    setup.gemini.replies = ["Do a detox with Rice.", "Detox on Rice then."]
+    fallback = send(client, "how to lose 5 kg").json()
+    assert fallback["body"] == SAFE_FALLBACK and fallback["suggestions"] == []
+
+
+def test_a_reloaded_thread_has_the_words_without_buttons(client, setup):
+    setup.gemini.replies = ["Your lentil stew fits."]
+    send(client, "dinner?")
+    messages = client.get("/coach/messages").json()["messages"]
+    assert messages[-1]["body"] == "Your lentil stew fits." and messages[-1]["suggestions"] == []
+
+
+async def test_the_real_context_ranks_the_persons_recipes_against_what_is_left_today():
+    """End to end through _build_context: ids come back for the buttons, and only
+    recipes that fit the room left today are listed as fits."""
+    mine = [
+        SimpleNamespace(id=STEW, title="Lentil stew", calories_per_serving=420, protein_g=25.0, carbs_g=50.0, fat_g=9.0),
+        SimpleNamespace(id=RICE, title="Huge feast", calories_per_serving=2500, protein_g=90.0, carbs_g=300.0, fat_g=80.0),
+    ]
+
+    class Db:
+        def begin_nested(self):
+            return _Savepoint()
+
+        async def execute(self, stmt):
+            sql = str(stmt)
+
+            class R:
+                def scalars(self_):
+                    return SimpleNamespace(all=lambda: mine if "FROM recipes" in sql else [])
+
+                def all(self_):
+                    return []
+
+                def scalar_one_or_none(self_):
+                    return None
+
+            return R()
+
+    target = SimpleNamespace(sex="female", goal="maintain", calorie_target=1800, protein_g=120, carbs_g=180, fat_g=60)
+    ctx, recipes = await router._build_context(Db(), ME, target, date(2026, 11, 20))
+    assert [(r["id"], r["title"]) for r in recipes] == [(STEW, "Lentil stew"), (RICE, "Huge feast")]
+    fits = ctx.split("Fits what is left today (ranked by the app, best first):\n")[1].split("\nRoutines you can offer")[0]
+    assert fits == "- Lentil stew"  # the 2,500 kcal feast does not fit in 1,800
