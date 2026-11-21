@@ -259,3 +259,31 @@ def test_cron_secret_with_odd_bytes_is_403_not_500(anon_client, monkeypatch):
     for path in ("/snaps/purge", "/notifications/cron/streak-reminders"):
         r = anon_client.post(path, headers={"X-Cron-Secret": b"caf\xe9"})
         assert r.status_code == 403, path
+
+
+# --- refused requests are explained in the server log --------------------------
+
+def test_a_refused_save_logs_which_field_and_rule_but_not_the_value(client, caplog):
+    body = {
+        "id": "x1", "name": "SECRET-DINNER", "calories": 99.5, "meal_type": "lunch", "source": "photo",
+        "timestamp": "2026-11-21T12:00:00", "log_date": "2026-11-21",
+    }
+    with caplog.at_level("WARNING", logger="calorie_backend"):
+        r = client.post("/logs", json=body)
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == ["body", "calories"], "the answer the app sees is unchanged"
+    line = next(m for m in caplog.messages if "request refused" in m)
+    assert "POST /logs" in line and "calories:int_from_float" in line
+    assert "SECRET-DINNER" not in line and "99.5" not in line
+
+
+def test_log_line_names_nested_fields(client, caplog):
+    body = {
+        "id": "x2", "name": "Rice", "calories": 100, "meal_type": "lunch", "source": "photo",
+        "timestamp": "2026-11-21T12:00:00", "log_date": "2026-11-21", "nutrients": {"fiber_g": 99999},
+        "estimate_basis": "y" * 200,
+    }
+    with caplog.at_level("WARNING", logger="calorie_backend"):
+        assert client.post("/logs", json=body).status_code == 422
+    line = next(m for m in caplog.messages if "request refused" in m)
+    assert "nutrients.fiber_g:less_than_equal" in line and "estimate_basis:string_too_long" in line

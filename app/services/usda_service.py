@@ -52,9 +52,16 @@ def _pick(found: dict[tuple[str, str], float], sources: list[tuple[str, str | No
     return None
 
 
+def _not_negative(value: float | None) -> float | None:
+    """USDA's "carbohydrate, by difference" is calculated and comes out slightly
+    below zero for some foods (-0.4 g per 100 g). A negative amount cannot be
+    logged (the save is refused), so it is read as none. Unknown stays unknown."""
+    return None if value is None else max(value, 0.0)
+
+
 def _extract_nutrients(food: dict) -> dict:
     found = _values_by_name(food)
-    return {key: _pick(found, sources) for key, sources in _NUTRIENT_SOURCES.items()}
+    return {key: _not_negative(_pick(found, sources)) for key, sources in _NUTRIENT_SOURCES.items()}
 
 
 def _extract_extras(food: dict) -> dict:
@@ -63,7 +70,7 @@ def _extract_extras(food: dict) -> dict:
     unit is left unknown rather than read as 1000x off."""
     found = _values_by_name(food)
     return {
-        f"{n.key}_per_100g": _pick(found, [(name, n.unit) for name in n.usda_names])
+        f"{n.key}_per_100g": _not_negative(_pick(found, [(name, n.unit) for name in n.usda_names]))
         for n in NUTRIENTS
     }
 

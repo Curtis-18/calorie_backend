@@ -1,7 +1,9 @@
 import logging
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, text
@@ -51,6 +53,21 @@ app = FastAPI(
 
 # The largest legitimate body is a base64 photo for /estimate-photo. Added
 # before CORS so CORS stays outermost and a 413 still carries its headers.
+
+
+@app.exception_handler(RequestValidationError)
+async def log_refused_request(request: Request, exc: RequestValidationError):
+    """Answer exactly as before (a 422 naming the fields), and leave a line in the
+    server log saying which fields were refused and why. Render's access log shows
+    only "422", so a refused save could not be diagnosed. Field names and rule
+    names only: never the values, which can be a person's food, notes or messages."""
+    problems = ", ".join(
+        f"{'.'.join(str(part) for part in e.get('loc', ()) if part != 'body')}:{e.get('type')}" for e in exc.errors()[:8]
+    )
+    log.warning("request refused %s %s: %s", request.method, request.url.path, problems)
+    return await request_validation_exception_handler(request, exc)
+
+
 app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_photo_bytes * 4 // 3 + 64 * 1024)
 app.add_middleware(CORSMiddleware, **cors_kwargs(settings))
 

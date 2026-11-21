@@ -171,3 +171,18 @@ async def test_search_skips_broken_branded_rows_but_keeps_lab_data(monkeypatch):
     results = await usda_service.search_foods("olive oil")
     assert [r.fdc_id for r in results] == [2, 3]
     assert results[1].calories_per_100g == 54.9
+
+
+def test_usda_negative_carbs_by_difference_is_read_as_zero():
+    """Calculated by difference, it is slightly below zero for some foods; a negative
+    amount could not be logged (the save was refused with a 422)."""
+    from app.services.usda_service import _extract_extras
+
+    out = _extract_nutrients(
+        {"foodNutrients": _nutrients(("Energy", "KCAL", 120.0), ("Protein", "G", 24.0), ("Carbohydrate, by difference", "G", -1.24))}
+    )
+    assert out["carbs_g"] == 0.0
+    assert out["protein_g"] == 24.0
+    assert out["fat_g"] is None, "unknown stays unknown, not zero"
+    extras = _extract_extras({"foodNutrients": _nutrients(("Sugars, total including NLEA", "G", -0.3))})
+    assert all(v is None or v >= 0 for v in extras.values())
