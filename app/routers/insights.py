@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.dates import resolve_today  # noqa: F401 - re-exported for tests
 from app.core.features import Feature, record_usage, require_feature
@@ -15,6 +16,7 @@ from app.core.rate_limit import insight_generations
 from app.core.security import get_current_user_id
 from app.models.insights_cache import InsightsCache
 from app.schemas.insights import InsightsOut
+from app.services import gemini_budget
 from app.services.insights_service import (
     degraded_insights,
     generate_insights,
@@ -24,6 +26,10 @@ from app.services.insights_service import (
 log = logging.getLogger("calorie_backend")
 
 router = APIRouter(prefix="/insights", tags=["insights"])
+
+class _NarrativeOff(Exception):
+    """GEMINI_INSIGHTS=false: the AI paragraph is switched off."""
+
 
 # How long a narrative is reused after the day's logs change underneath it.
 NARRATIVE_MAX_AGE = timedelta(hours=3)
@@ -81,15 +87,20 @@ async def get_insights(
     try:
         # Each generation is a paid Gemini call, and `refresh=true` forces one.
         # Over the limit, fall through to the same degraded answer as an outage.
+        if not settings.gemini_insights:
+            raise _NarrativeOff()
         if not insight_generations.allow("insights", user_id):
             raise RuntimeError("insights rate limit reached")
         require_feature(user_id, Feature.INSIGHTS)
         payload = await generate_insights(db, user_id, trend, today, lang)
-    except Exception:  # noqa: BLE001 - the trend is still worth serving
+    except Exception as exc:  # noqa: BLE001 - the trend is still worth serving
         # Gemini being down (503 under load, or a timeout) must not take the
         # whole screen down. Serve last time's narrative if we have one and
         # always attach the freshly computed trend, which is local data.
-        log.exception("insight generation failed; serving a degraded response")
+        if isinstance(exc, _NarrativeOff) or gemini_budget.is_quota_error(exc):
+            log.info("insight narrative not generated (switched off or quota spent); serving a degraded response")
+        else:
+            log.exception("insight generation failed; serving a degraded response")
         if cached and cached.payload and same_language:
             payload = dict(cached.payload)
             payload["weekly_trend"] = trend

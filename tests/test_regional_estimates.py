@@ -218,6 +218,9 @@ def test_a_failed_or_empty_estimate_leaves_the_item_exactly_as_before(client, mo
 def test_an_unknown_region_is_ignored_and_none_means_no_hint(client, monkeypatch):
     _, asked = _scan(client, monkeypatch, [{"name": "x", "estimated_grams": 10.0}], {}, region="narnia")
     assert asked["identify"] == {} and asked["estimate"][1] is None
+    from app.services import scan_cache
+
+    scan_cache.clear()  # the same photo twice would be answered from memory, not asked again
     _, asked = _scan(client, monkeypatch, [{"name": "x", "estimated_grams": 10.0}], {})
     assert asked["identify"] == {}
 

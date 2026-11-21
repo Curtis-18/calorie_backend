@@ -11,11 +11,12 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.dates import resolve_today
 from app.core.features import Feature, record_usage, require_feature
-from app.core.rate_limit import photo_scans
+from app.core.rate_limit import photo_scans, scans_per_day
 from app.core.security import get_current_user_id
 from app.core.language import get_language
 from app.models.photo import EstimatedFood
-from app.services.estimates import estimate_foods
+from app.services import gemini_budget, scan_cache
+from app.services.estimates import estimate_foods, validate_estimate
 from app.services.gemini_service import identify_foods
 from app.services.regions import is_region
 from app.services.usda_service import enrich_detected_foods
@@ -83,6 +84,10 @@ async def estimate_photo(
         raise HTTPException(status_code=413, detail="Image too large")
 
     photo_scans.check("photo", user_id, "You've scanned a lot of photos. Try again in a little while.")
+    daily_cap = settings.scans_per_user_per_day
+    scans_per_day.limit = max(daily_cap, 1)
+    if daily_cap > 0 and not scans_per_day.has_room("scan", user_id):
+        raise HTTPException(status_code=429, detail="daily_scan_cap")
     require_feature(user_id, Feature.PHOTO_SCAN)
     day = resolve_today(request.date)
 
@@ -91,23 +96,33 @@ async def estimate_photo(
     # numbers: no food names, nothing about the person beyond the log's own id.
     started = time.monotonic()
     region = request.region if request.region and is_region(request.region) else None
-    try:
-        mime = sniff_image_mime(image_bytes)
-        note = (request.note or "").strip()
-        extras = {}
-        if note:
-            extras["note"] = note
-        if region:
-            extras["region"] = region
-        if lang != "en":
-            extras["lang"] = lang
-        detected = await identify_foods(image_bytes, mime_type=mime, **extras)
-    except Exception as exc:  # noqa: BLE001
-        # Log the detail, return something that doesn't leak upstream keys
-        # or internal URLs to the client.
-        log.exception("photo estimation failed")
-        log.info("scan_done status=gemini_failed ms_gemini=%d", _ms(started))
-        raise HTTPException(status_code=502, detail="Photo analysis service unavailable")
+    cache_key = scan_cache.key_for(image_bytes, request.note, region, lang)
+    detected = scan_cache.get(cache_key)
+    from_cache = detected is not None
+    if detected is None:
+        try:
+            mime = sniff_image_mime(image_bytes)
+            note = (request.note or "").strip()
+            extras = {}
+            if note:
+                extras["note"] = note
+            if region:
+                extras["region"] = region
+            if lang != "en":
+                extras["lang"] = lang
+            detected = await identify_foods(image_bytes, mime_type=mime, **extras)
+        except Exception as exc:  # noqa: BLE001
+            if gemini_budget.is_quota_error(exc):
+                # Not a failure of the photo or of the person: the AI's allowance is
+                # spent. A distinct answer lets the app say so (and not retry).
+                log.info("scan_done status=quota ms_gemini=%d", _ms(started))
+                raise HTTPException(status_code=429, detail="ai_quota")
+            # Log the detail, return something that doesn't leak upstream keys
+            # or internal URLs to the client.
+            log.exception("photo estimation failed")
+            log.info("scan_done status=gemini_failed ms_gemini=%d", _ms(started))
+            raise HTTPException(status_code=502, detail="Photo analysis service unavailable")
+        scan_cache.put(cache_key, detected)
     gemini_done = time.monotonic()
 
     # Macros are filled in here, in parallel, instead of the client making one
@@ -120,14 +135,28 @@ async def estimate_photo(
     usda_done = time.monotonic()
 
     # A dish the database has no entry for (a regional stew, street food) gets
-    # a typical value with its basis stated, so it can still be logged. Only
-    # unmatched items cost this extra call; the photo is not sent again. Any
-    # failure just leaves them unmatched, as before.
+    # a typical value with its basis stated, so it can still be logged. The scan
+    # already carries one for every item (one Gemini call, not two); it is checked
+    # in code and used only where the database had no match. Only an item whose
+    # own estimate was missing or failed the checks costs the extra call (the photo
+    # is not sent again). Any failure just leaves them unmatched, as before.
     for food in foods:
+        inline = food.pop("estimate", None)
         if food.get("matched"):
             food["source"], food["confidence"] = "usda", "high"
-    unmatched = [f for f in foods if not f.get("matched")]
-    estimated = 0
+        elif isinstance(inline, dict):
+            checked = validate_estimate(inline, lang)
+            if checked is not None:
+                food.update(
+                    calories_per_100g=checked["calories_per_100g"],
+                    protein_g_per_100g=checked["protein_g_per_100g"],
+                    carbs_g_per_100g=checked["carbs_g_per_100g"],
+                    fat_g_per_100g=checked["fat_g_per_100g"],
+                    source="ai_estimate",
+                    confidence="medium",
+                    estimate_basis=checked["basis"],
+                )
+    unmatched = [f for f in foods if not f.get("matched") and f.get("source") != "ai_estimate"]
     if unmatched:
         estimates = await estimate_foods([f["name"] for f in unmatched], region, **({"lang": lang} if lang != "en" else {}))
         for food in unmatched:
@@ -143,7 +172,7 @@ async def estimate_photo(
                 confidence="medium",
                 estimate_basis=found["basis"],
             )
-            estimated += 1
+    estimated = sum(1 for f in foods if f.get("source") == "ai_estimate")
     finished = time.monotonic()
     matched = sum(1 for f in foods if f.get("matched"))
     log.info(
@@ -151,7 +180,11 @@ async def estimate_photo(
         (finished - started) * 1000, (gemini_done - started) * 1000, (usda_done - gemini_done) * 1000,
         (finished - usda_done) * 1000, len(foods), matched, estimated,
     )
-    background.add_task(record_usage, user_id, Feature.PHOTO_SCAN, day)
+    if not from_cache:
+        # A repeat of the same photo costs no Gemini call, so it is not counted.
+        background.add_task(record_usage, user_id, Feature.PHOTO_SCAN, day)
+        if daily_cap > 0:
+            scans_per_day.record("scan", user_id)
     return foods
 
 

@@ -5,13 +5,15 @@ from app.i18n import LANGUAGE_NAMES
 from app.services.gemini_client import generate_content
 from app.services.regions import region_label
 
-PROMPT = """Identify each distinct food item visible in this image.
-For each item, estimate its portion size in grams.
+PROMPT = """List every separate food or ingredient you can see in this image, each as its own item.
+Break a mixed plate apart: rice, grilled chicken, a sauce and a side of vegetables are four items, never one item such as "plate of food" or "chicken and rice meal". Only keep things together when they cannot be told apart (a stew or a blended sauce is one item).
+For each item, estimate its portion size in grams, and give typical nutrition per 100 grams of that food as it is commonly prepared.
 Respond with ONLY a JSON array, no other text, in this exact shape:
-[{"name": "food name", "estimated_grams": 150, "preparation": "grilled", "kind": "main"}]
+[{"name": "food name", "estimated_grams": 150, "preparation": "grilled", "kind": "main", "estimate": {"calories_per_100g": 165, "protein_g": 31.0, "carbs_g": 0.0, "fat_g": 3.6, "basis": "typical grilled chicken breast"}}]
 Also give, for each item, only what you can see:
 - "preparation": one of raw, grilled, fried, boiled, baked, sauteed, unknown
 - "kind": one of salad, drink, main, side, fruit, dessert, other
+- "estimate": the per-100 g numbers above and "basis", one short plain sentence naming what they assume (include cooking oil if it matters). Never invent vitamins or minerals.
 Use "unknown" or "other" when you are not sure. Do not guess hidden ingredients.
 If you cannot identify any food, respond with an empty array: []"""
 
@@ -33,7 +35,7 @@ The person mostly eats {region} food. Use that only as context when naming a dis
 # (the food database is searched with it); this is what the person reads.
 LANGUAGE_PROMPT = """
 
-The person reads {language}. For each item also give "local_name": the food's name in {language}, short and natural (what they would call it). Keep "name" in English exactly as before. Write "note_applied", when you give one, in {language}."""
+The person reads {language}. For each item also give "local_name": the food's name in {language}, short and natural (what they would call it). Keep "name" in English exactly as before. Write "note_applied", when you give one, and the estimate "basis" in {language}."""
 
 ADDED_EXTRAS = {"oil", "butter", "dressing", "cheese", "sugar"}
 
@@ -57,6 +59,16 @@ _API_ERRORS = {
                 "added": {"type": "ARRAY", "items": {"type": "STRING"}},
                 "note_applied": {"type": "STRING"},
                 "local_name": {"type": "STRING"},
+                "estimate": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "calories_per_100g": {"type": "NUMBER"},
+                        "protein_g": {"type": "NUMBER"},
+                        "carbs_g": {"type": "NUMBER"},
+                        "fat_g": {"type": "NUMBER"},
+                        "basis": {"type": "STRING"},
+                    },
+                },
             },
             "required": ["name", "estimated_grams"],
         },
@@ -106,6 +118,10 @@ def _extract_items(data: dict) -> list[dict]:
         local = " ".join(str(entry.get("local_name") or "").split())[:80]
         if local and local.lower() != item["name"].lower():
             item["local_name"] = local
+        # Raw: it is checked in code (estimates.validate_estimate) and only
+        # used for a food the database has no match for.
+        if isinstance(entry.get("estimate"), dict):
+            item["estimate"] = entry["estimate"]
         reason = entry.get("note_applied")
         if isinstance(reason, str) and reason.strip():
             item["note_applied"] = reason.strip()[:80]

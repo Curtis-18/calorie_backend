@@ -6,6 +6,7 @@ import time
 import httpx
 
 from app.core.config import settings
+from app.services import gemini_budget
 
 log = logging.getLogger("calorie_backend")
 
@@ -37,10 +38,10 @@ def thinking_config(model: str) -> dict | None:
     return None
 
 
-def _with_thinking(payload: dict) -> dict:
+def _with_thinking(payload: dict, model: str) -> dict:
     """A copy of [payload] asking for minimal thinking, unless the caller set
     its own or Gemini already rejected the parameter."""
-    config = thinking_config(settings.gemini_model)
+    config = thinking_config(model)
     if _thinking_rejected or config is None:
         return payload
     out = copy.deepcopy(payload)
@@ -58,12 +59,12 @@ def _kind(payload: dict) -> str:
     return "insights"
 
 
-def _log_call(payload: dict, data: dict, attempts: int, started: float, kind: str | None = None) -> None:
+def _log_call(payload: dict, data: dict, attempts: int, started: float, kind: str | None = None, model: str | None = None) -> None:
     usage = data.get("usageMetadata") or {}
     log.info(
         "gemini_call kind=%s model=%s attempts=%d ms=%d prompt_tokens=%s output_tokens=%s thought_tokens=%s",
         kind or _kind(payload),
-        settings.gemini_model,
+        model or settings.gemini_model,
         attempts,
         (time.monotonic() - started) * 1000,
         usage.get("promptTokenCount", "?"),
@@ -81,12 +82,37 @@ async def generate_content(payload: dict, timeout: float = 30.0, kind: str | Non
     Returns the decoded JSON body. Raises the last HTTP error (or transport
     error) once every attempt is exhausted, so callers can still decide how to
     degrade.
+
+    Google counts the free quota per model. When the main model's allowance is
+    spent (our own budget, a refusal while its breaker is open, or a 429 just
+    now) and GEMINI_FALLBACK_MODEL is set, the same request goes to that model
+    instead. With no fallback, the error is the main model's, as before.
     """
+    kind = kind or _kind(payload)
+    models = [settings.gemini_model]
+    if settings.gemini_fallback_model and settings.gemini_fallback_model not in models:
+        models.append(settings.gemini_fallback_model)
+    last: Exception | None = None
+    for model in models:
+        try:
+            return await _generate(model, payload, timeout, kind)
+        except Exception as exc:  # noqa: BLE001
+            if not gemini_budget.is_quota_error(exc):
+                raise
+            last = exc
+            if model != models[-1]:
+                log.warning("gemini quota spent for %s; trying %s", model, models[-1])
+    raise last  # type: ignore[misc]
+
+
+async def _generate(model: str, payload: dict, timeout: float, kind: str) -> dict:
     global _thinking_rejected
-    url = f"{settings.gemini_base_url}/models/{settings.gemini_model}:generateContent"
+    # Our own budget and the breaker after a 429: refuse at once, send nothing.
+    gemini_budget.check(kind, model=model)
+    url = f"{settings.gemini_base_url}/models/{model}:generateContent"
     last_exc: Exception | None = None
     started = time.monotonic()
-    body = _with_thinking(payload)
+    body = _with_thinking(payload, model)
     sent_thinking = body is not payload
 
     async with httpx.AsyncClient() as client:
@@ -112,7 +138,8 @@ async def generate_content(payload: dict, timeout: float = 30.0, kind: str | Non
             else:
                 if response.status_code < 400:
                     data = response.json()
-                    _log_call(payload, data, attempt, started, kind)
+                    gemini_budget.record_call(model=model)
+                    _log_call(payload, data, attempt, started, kind, model)
                     return data
 
                 log.error(
@@ -122,6 +149,10 @@ async def generate_content(payload: dict, timeout: float = 30.0, kind: str | Non
                     MAX_ATTEMPTS,
                     response.text[:500],
                 )
+                if response.status_code == 429:
+                    # Stop every other call too until Google can answer again.
+                    gemini_budget.note_rejected(response.text, model=model)
+
                 # A wrong thinking parameter must not break the feature: drop
                 # it for good and repeat this call without it.
                 if (

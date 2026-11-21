@@ -103,3 +103,19 @@ def no_dish_estimates(monkeypatch):
         return {}
 
     monkeypatch.setattr(photo_estimation, "estimate_foods", nothing)
+
+
+@pytest.fixture(autouse=True)
+def fresh_gemini_budget():
+    """The Gemini budget and its 429 breaker are process-wide, so every test starts with them clear."""
+    from app.core.rate_limit import photo_scans, scans_per_day
+    from app.services import gemini_budget, scan_cache
+
+    gemini_budget.reset()
+    scan_cache.clear()
+    scans_per_day.reset()
+    photo_scans.reset()
+    yield
+    gemini_budget.reset()
+    scan_cache.clear()
+    scans_per_day.reset()

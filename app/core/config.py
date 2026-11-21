@@ -35,6 +35,22 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_model: str = "gemini-3.6-flash"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    # Running on Gemini's free tier. Google gives the whole project (all users
+    # together) a small number of requests a day, shown only in AI Studio. Set
+    # this to that number so scans are never starved by the coach or Insights
+    # (see services/gemini_budget.py). 0 = no limit of our own.
+    gemini_daily_budget: int = 0
+    # A second model to use when the main one's quota is spent (Google counts
+    # the free quota per model, so this is a second daily allowance). Empty = none.
+    # Its own daily number is GEMINI_FALLBACK_DAILY_BUDGET (0 = no limit of our own).
+    gemini_fallback_model: str = ""
+    gemini_fallback_daily_budget: int = 0
+    # Set GEMINI_INSIGHTS=false to stop the AI paragraph on Insights (the chart,
+    # tips and weekly report are computed in code and stay). Saves the most calls.
+    gemini_insights: bool = True
+    # Photo scans one person may do per day (0 = no limit of our own), so one
+    # person cannot use up the shared free allowance.
+    scans_per_user_per_day: int = 0
     supabase_url: str
     database_url: str
     jwt_audience: str = "authenticated"
