@@ -27,3 +27,14 @@ class MessageAttachment(Base):
 
     message_id = Column(PGUUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True)
     attachment = Column(JSONB, nullable=False)
+
+
+class MessageQuote(Base):
+    """The message this one replies to. Its own table, read in a savepoint, like
+    attachments. [quoted_id] becomes null when the original is unsent, so no copy
+    of the text outlives the original."""
+
+    __tablename__ = "message_quotes"
+
+    message_id = Column(PGUUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True)
+    quoted_id = Column(PGUUID(as_uuid=True), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)

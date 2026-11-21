@@ -9,6 +9,8 @@ MAX_MESSAGE_CHARS = 1000
 class MessageIn(BaseModel):
     id: uuid.UUID = Field(..., description="Chosen by the app so a retry can't send twice")
     body: str = Field(..., max_length=MAX_MESSAGE_CHARS * 2)
+    # The earlier message of this conversation being replied to (a quote).
+    reply_to: uuid.UUID | None = None
 
     @field_validator("body")
     @classmethod
@@ -19,6 +21,16 @@ class MessageIn(BaseModel):
         if len(v) > MAX_MESSAGE_CHARS:
             raise ValueError(f"Messages can be at most {MAX_MESSAGE_CHARS} characters.")
         return v
+
+
+class QuoteOut(BaseModel):
+    """What a reply quotes. When the original was unsent, only `deleted` is true:
+    the text is gone for everyone."""
+
+    id: uuid.UUID | None = None
+    mine: bool | None = None  # whether I wrote the quoted message
+    body: str | None = None  # shortened
+    deleted: bool = False
 
 
 class MessageOut(BaseModel):
@@ -32,6 +44,8 @@ class MessageOut(BaseModel):
     # A card shown under the text, e.g. {"kind": "recipe", "id": ..., "title": ..., "calories": ...}.
     # Older apps ignore it and show the text.
     attachment: dict | None = None
+    # The message this one replies to. Older apps ignore it.
+    quote: QuoteOut | None = None
 
 
 class ThreadOut(BaseModel):
