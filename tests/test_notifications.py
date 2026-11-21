@@ -398,3 +398,25 @@ def test_logging_reminder_copy_is_short_and_has_no_numbers_about_food(kind):
         title, body = copy_for(kind, key, count=12)
         assert len(title) <= 60 and len(body) <= 90
         assert "kcal" not in (title + body).lower() and "calorie" not in (title + body).lower()
+
+
+# --- on by default -----------------------------------------------------------
+
+def test_with_nothing_saved_every_notification_is_on():
+    from app.services.notifier import prefs_from_row
+
+    p = prefs_from_row(None)
+    assert p.friend_snaps and p.reactions and p.streak_reminders and p.milestones
+    assert p.paused_until is None
+    for kind in Kind:
+        assert decide(kind, p, at(12), 0).allowed, kind
+
+
+def test_a_saved_row_without_choices_also_starts_everything_on():
+    """Registering a device saves only the time zone; the switches must come out on."""
+    from app.models.notification import NotificationPrefs
+
+    cols = NotificationPrefs.__table__.c
+    for name in ("friend_snaps", "reactions", "streak_reminders", "milestones"):
+        assert cols[name].default.arg is True, name
+    assert cols.paused_until.default is None
