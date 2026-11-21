@@ -32,6 +32,7 @@ class Kind(str, Enum):
     MEAL_NUDGE = "meal_nudge"
     LOG_REMINDER = "log_reminder"          # nothing logged yet today
     MY_STREAK_AT_RISK = "my_streak_at_risk"  # your own logging streak ends tonight
+    ANNOUNCEMENT = "announcement"          # one-off "what's new", sent by hand
 
 
 # Which preference switch controls which kind.
@@ -44,6 +45,9 @@ _SWITCH = {
     Kind.MEAL_NUDGE: None,  # scheduled on the phone, by its own hour setting
     Kind.LOG_REMINDER: "streak_reminders",
     Kind.MY_STREAK_AT_RISK: "streak_reminders",
+    # Not about a friend or a streak: it has no switch of its own, but pause,
+    # quiet hours and the daily cap all still apply.
+    Kind.ANNOUNCEMENT: None,
 }
 
 
@@ -141,7 +145,21 @@ _COPY: dict[Kind, list[tuple[str, str]]] = {
 }
 
 
+# One-off announcements, by the same id as the app's "What's new" release.
+# Each is sent by hand (never by a schedule), at most once per person.
+ANNOUNCEMENTS: dict[str, tuple[str, str]] = {
+    "nov-21-2026-bites-home": (
+        "🔥 NuStreak just got better",
+        "Bites on Today, foldable meals and Add to Home Screen. Tap to see what's new.",
+    ),
+}
+
+
 def copy_for(kind: Kind, key: str, lang: str = "en", **ctx) -> tuple[str, str]:
+    if kind is Kind.ANNOUNCEMENT:
+        # Newest first: a caller that names no release gets the latest one.
+        title, body = ANNOUNCEMENTS[ctx.get("release") or next(iter(ANNOUNCEMENTS))]
+        return t(lang, title), t(lang, body)
     options = _COPY[kind]
     index = int(hashlib.sha256(f"{kind.value}:{key}".encode()).hexdigest(), 16) % len(options)
     title, body = options[index]

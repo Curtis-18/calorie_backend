@@ -165,4 +165,6 @@ TABLE = {
     "A full session of bodyweight strength with rests between rounds.": "Eine komplette Krafteinheit mit dem eigenen Körpergewicht, mit Pausen zwischen den Runden.",
     "30-minute walk": "30-Minuten-Spaziergang",
     "A longer steady walk, easy at the start and the end.": "Ein längerer gleichmäßiger Spaziergang, am Anfang und Ende locker.",
+    "🔥 NuStreak just got better": "🔥 NuStreak ist noch besser geworden",
+    "Bites on Today, foldable meals and Add to Home Screen. Tap to see what's new.": "Bissen auf „Heute“, einklappbare Mahlzeiten und Home-Bildschirm. Tippe für die Neuheiten.",
 }

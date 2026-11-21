@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,7 @@ from app.models.food_log import FoodLog
 from app.services.notification_rules import (
     LOG_REMINDER_WINDOW,
     MY_STREAK_WINDOW,
+    ANNOUNCEMENTS,
     Kind,
     in_reminder_window,
     in_window,
@@ -30,7 +32,7 @@ from app.services.notification_rules import (
     pick_streak_to_save,
 )
 from app.services.progress_service import LogRow, compute_progress
-from app.services import push_sender
+from app.services import announcements, push_sender
 from app.services.notifier import notify, prefs_from_row
 from app.services.snap_streaks import streaks_with
 
@@ -292,3 +294,37 @@ async def streak_reminders(
     await db.execute(delete(NotificationLog).where(NotificationLog.created_at < now - LOG_KEEP))
     await db.commit()
     return results
+
+
+class AnnounceIn(BaseModel):
+    release: str = Field(max_length=100)
+    # False (the default) only counts who would be told; nothing is sent.
+    send: bool = False
+    # Real deliveries per call; call again to carry on (nobody is sent it twice).
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+@router.post("/cron/announce")
+async def announce(
+    data: AnnounceIn,
+    x_cron_secret: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tell everyone with a registered device about a release, once. Run by hand.
+
+    Without `"send": true` it only previews: how many people would get it and
+    why the others would not (quiet hours, paused, already told). Sending needs
+    real web push to be switched on, otherwise a "dry run" would be recorded as
+    delivered and the real send afterwards would skip everyone.
+
+    Disabled until CRON_SECRET is set, like the reminders.
+    """
+    if not settings.cron_secret:
+        raise HTTPException(404, "Not found")
+    if not x_cron_secret or not secrets.compare_digest(x_cron_secret.encode(), settings.cron_secret.encode()):
+        raise HTTPException(403, "Forbidden")
+    if data.release not in ANNOUNCEMENTS:
+        raise HTTPException(404, "No announcement with that id")
+    if data.send and not push_sender.web_push_ready():
+        raise HTTPException(409, "Web push is not switched on (PUSH_MODE=web with the VAPID keys), so nothing was sent.")
+    return await announcements.broadcast(db, data.release, send=data.send, limit=data.limit)

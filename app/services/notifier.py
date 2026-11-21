@@ -41,6 +41,48 @@ def prefs_from_row(row: NotificationPrefs | None) -> Prefs:
     )
 
 
+async def _sent_today(db: AsyncSession, user_id: uuid.UUID, prefs: Prefs, now: datetime) -> int:
+    start, end = local_day_bounds_utc(now, prefs)
+    return (
+        await db.execute(
+            select(func.count())
+            .select_from(NotificationLog)
+            .where(
+                NotificationLog.user_id == user_id,
+                NotificationLog.status.in_(COUNTED),
+                NotificationLog.created_at >= start,
+                NotificationLog.created_at < end,
+            )
+        )
+    ).scalar_one()
+
+
+async def preview(
+    db: AsyncSession, user_id: uuid.UUID, kind: Kind, *, dedupe_key: str | None = None, now: datetime | None = None
+) -> str:
+    """What `notify` would do right now, without sending or recording anything:
+    "would_send", "no_device", "duplicate" or the reason the rules say no."""
+    now = now or datetime.now(timezone.utc)
+    tokens = (await db.execute(select(DeviceToken.token).where(DeviceToken.user_id == user_id))).scalars().all()
+    if not tokens:
+        return "no_device"
+    prefs = prefs_from_row(
+        (await db.execute(select(NotificationPrefs).where(NotificationPrefs.user_id == user_id))).scalar_one_or_none()
+    )
+    decision = decide(kind, prefs, now, await _sent_today(db, user_id, prefs, now), cap=settings.push_daily_cap)
+    if not decision.allowed:
+        return decision.reason
+    if dedupe_key is not None:
+        taken = (
+            await db.execute(
+                select(NotificationLog.id).where(NotificationLog.user_id == user_id, NotificationLog.dedupe_key == dedupe_key)
+            )
+        ).first()
+        if taken is not None:
+            return "duplicate"
+    return "would_send"
+
+
 async def notify(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -62,19 +104,7 @@ async def notify(
         (await db.execute(select(NotificationPrefs).where(NotificationPrefs.user_id == user_id))).scalar_one_or_none()
     )
 
-    start, end = local_day_bounds_utc(now, prefs)
-    sent_today = (
-        await db.execute(
-            select(func.count())
-            .select_from(NotificationLog)
-            .where(
-                NotificationLog.user_id == user_id,
-                NotificationLog.status.in_(COUNTED),
-                NotificationLog.created_at >= start,
-                NotificationLog.created_at < end,
-            )
-        )
-    ).scalar_one()
+    sent_today = await _sent_today(db, user_id, prefs, now)
 
     decision = decide(kind, prefs, now, sent_today, cap=settings.push_daily_cap)
     if not decision.allowed:
