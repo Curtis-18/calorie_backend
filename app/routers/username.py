@@ -8,7 +8,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.language import get_language
 from app.core.security import get_current_user_id
+from app.i18n import translate_detail
 from app.models.user import Profile
 from app.schemas.username import UsernameCheckOut, UsernameIn, UsernameOut
 from app.services.username_service import can_change_at, validate_username
@@ -31,14 +33,15 @@ async def check_username(
     name: str = Query(..., max_length=64),
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
+    lang: str = Depends(get_language),
 ):
     """Live availability for the picker. Your own current name counts as free."""
     reason = validate_username(name)
     if reason:
-        return {"available": False, "reason": reason}
+        return {"available": False, "reason": translate_detail(lang, reason)}
     owner = await _owner(db, name.strip())
     if owner is not None and owner != user_id:
-        return {"available": False, "reason": TAKEN}
+        return {"available": False, "reason": translate_detail(lang, TAKEN)}
     return {"available": True, "reason": None}
 
 

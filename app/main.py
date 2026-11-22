@@ -2,10 +2,11 @@ import logging
 import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +14,7 @@ from app.core.body_limit import BodyLimitMiddleware
 from app.core.config import Settings, settings
 from app.core.database import get_db
 from app.core.security import get_current_user_id
+from app.i18n import parse_language, translate_detail
 from app.models.user import Profile
 from app.services import avatars
 from app.routers import (
@@ -53,6 +55,16 @@ app = FastAPI(
 
 # The largest legitimate body is a base64 photo for /estimate-photo. Added
 # before CORS so CORS stays outermost and a 413 still carries its headers.
+
+
+@app.exception_handler(StarletteHTTPException)
+async def error_in_the_apps_language(request: Request, exc: StarletteHTTPException):
+    """Every error message a person can read, in the language the app is showing
+    (its Accept-Language header). Status, headers and everything else are as
+    raised; a message that is not listed is sent as written."""
+    lang = parse_language(request.headers.get("accept-language"))
+    exc.detail = translate_detail(lang, exc.detail)
+    return await http_exception_handler(request, exc)
 
 
 @app.exception_handler(RequestValidationError)
