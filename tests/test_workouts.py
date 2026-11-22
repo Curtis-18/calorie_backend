@@ -15,10 +15,14 @@ OTHER = [c for c in SUPPORTED if c != "en"]
 
 # ---- the library itself ---------------------------------------------------------------------------
 
-def test_there_are_routines_of_five_fifteen_and_thirty_minutes():
-    assert {r.minutes for r in workouts.ROUTINES} == {5, 15, 30}
+def test_there_are_routines_from_two_to_thirty_minutes():
+    assert {r.minutes for r in workouts.ROUTINES} == {2, 3, 5, 10, 15, 20, 30}
+    # The coach's original seven are all still there.
+    assert {"reset_5", "legs_5", "full_15", "core_15", "walk_15", "strength_30", "walk_30"} <= {r.id for r in workouts.ROUTINES}
     assert len({r.id for r in workouts.ROUTINES}) == len(workouts.ROUTINES)
     assert {r.focus for r in workouts.ROUTINES} <= set(workouts.FOCUS_LABELS)
+    assert {r.level for r in workouts.ROUTINES} <= set(workouts.LEVEL_LABELS)
+    assert set(workouts.FOCUS_SLICE) == set(workouts.FOCUS_LABELS) and set(workouts.FOCUS_SLICE.values()) == set(workouts.SLICES)
 
 
 def test_every_step_uses_a_known_move_and_amount():
@@ -139,3 +143,100 @@ def test_fixed_replies_and_old_threads_never_carry_a_routine(client, setup):  # 
     setup.gemini.replies = ["Try the 15-minute walk."]
     send(client, "move?")
     assert all(m["workouts"] == [] for m in client.get("/coach/messages").json()["messages"])
+
+
+# ---- the Workouts tab: library, cards and the player's step list -------------------------------
+
+def test_every_slice_of_the_plate_has_routines_and_there_are_move_bites():
+    slices = {workouts.slice_of(r) for r in workouts.ROUTINES}
+    assert slices == set(workouts.SLICES)
+    assert sorted(r.minutes for r in workouts.ROUTINES if r.minutes <= 5)[0] == 2  # tiny ones exist
+    for s in workouts.SLICES:
+        assert sum(1 for r in workouts.ROUTINES if workouts.slice_of(r) == s) >= 3, s
+
+
+def test_the_library_is_shortest_first_and_each_card_is_complete():
+    lib = workouts.library("en")
+    minutes = [c["minutes"] for c in lib["routines"]]
+    assert minutes == sorted(minutes) and len(lib["routines"]) == len(workouts.ROUTINES)
+    assert lib["slices"] == ["strength", "cardio", "mobility", "fun"]
+    for c in lib["routines"]:
+        assert set(c) == {"id", "name", "minutes", "focus", "slice", "level", "level_label", "summary"}
+        assert c["slice"] in workouts.SLICES and c["level"] in workouts.LEVEL_LABELS
+
+
+def test_the_library_is_in_the_persons_language():
+    es = {c["id"]: c for c in workouts.library("es")["routines"]}
+    assert es["walk_15"]["name"] != "15-minute walk" and es["walk_15"]["level_label"] == "Fácil"
+
+
+@pytest.mark.parametrize("routine", workouts.ROUTINES, ids=lambda r: r.id)
+def test_the_player_list_matches_the_routine(routine):
+    steps = workouts.play_steps(routine)
+    assert steps[0]["section"] == "warm" and steps[-1]["section"] == "cool"
+    assert {s["mode"] for s in steps} <= {"timed", "reps", "rest"}
+    for s in steps:
+        if s["mode"] == "timed":
+            assert s["seconds"] and s["seconds"] > 0 and s["reps"] is None
+        elif s["mode"] == "reps":
+            assert s["reps"] and s["reps"] > 0 and s["seconds"] is None
+        else:
+            assert s["seconds"] == workouts.REST_SECONDS_PER_ROUND
+    rests = [s for s in steps if s["mode"] == "rest"]
+    assert len(rests) == (routine.rounds if routine.rounds > 1 else 0)
+    rounds_seen = sorted({s["round"] for s in steps if s["section"] == "main"})
+    assert rounds_seen == list(range(1, routine.rounds + 1))
+
+
+def test_each_side_becomes_two_timed_steps_and_reps_each_side_stays_one():
+    steps = workouts.play_steps(workouts.get("stretch_10"))
+    hamstring = [s for s in steps if s["name"] == "Hamstring stretch"]
+    assert [(s["mode"], s["seconds"], s["side"]) for s in hamstring] == [("timed", 30, 1), ("timed", 30, 2)]
+    reach = [s for s in steps if s["name"] == "Side reach"]
+    assert [(s["mode"], s["reps"], s["side"]) for s in reach] == [("reps", 6, None)]
+    assert reach[0]["amount"] == "6 reps each side"
+
+
+def test_the_total_time_of_the_player_list_matches_the_stated_minutes():
+    for r in workouts.ROUTINES:
+        timed = sum(s["seconds"] or 0 for s in workouts.play_steps(r))
+        reps = sum((s["reps"] or 0) * workouts.SECONDS_PER_REP * (2 if "each side" in s["amount"] else 1) for s in workouts.play_steps(r))
+        assert abs(timed + reps - r.minutes * 60) <= max(90, 0.2 * r.minutes * 60), r.id
+
+
+def test_rest_is_between_rounds_and_nothing_in_the_new_text_is_about_calories():
+    steps = workouts.play_steps(workouts.get("full_15"))
+    assert [s["name"] for s in steps if s["mode"] == "rest"] == ["Rest"] * 3
+    for lang in SUPPORTED:
+        for step in workouts.play_steps(workouts.get("cardio_20"), lang):
+            assert not re.search(r"kcal|calor|burn|earn", f"{step['name']} {step['cue']}", re.I)
+
+
+# ---- the routes -----------------------------------------------------------------------------------
+
+def test_the_library_route_needs_a_login_and_lists_routines(client):
+    from app.main import app
+
+    r = client.get("/workouts")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["routines"]) == len(workouts.ROUTINES) and body["slices"] == list(workouts.SLICES)
+    from fastapi.testclient import TestClient
+
+    app.dependency_overrides.clear()
+    assert TestClient(app).get("/workouts").status_code in (401, 403)
+
+
+def test_one_workout_comes_with_its_player_steps_and_a_missing_one_is_404(client):
+    r = client.get("/workouts/walk_10")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["minutes"] == 10 and body["slice"] == "cardio" and body["level_label"] == "Easy"
+    assert [s["mode"] for s in body["play"]] == ["timed", "timed", "timed"]
+    assert body["safety"] == workouts.t("en", workouts.SAFETY)
+    assert client.get("/workouts/nope").status_code == 404
+
+
+def test_the_route_speaks_the_language_in_the_header(client):
+    r = client.get("/workouts/walk_10", headers={"Accept-Language": "es"})
+    assert r.json()["name"] == "Caminata de 10 minutos"

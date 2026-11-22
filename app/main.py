@@ -17,7 +17,7 @@ from app.models.user import Profile
 from app.services import avatars
 from app.routers import (
     account, activity, adjustments, avatar, budget, coach, collections, recipe_media, foods, friends, insights, logs, messages, notifications, photo_estimation, prefs, progress, recipes, reports, snaps, stories, targets, username,
-    weights,
+    weights, workouts,
 )
 
 # Import every model before the app serves traffic so Base.metadata knows
@@ -95,6 +95,7 @@ app.include_router(avatar.router)
 app.include_router(stories.router)
 app.include_router(messages.router)
 app.include_router(coach.router)
+app.include_router(workouts.router)
 
 
 @app.get("/")

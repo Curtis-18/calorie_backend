@@ -30,7 +30,17 @@ AMOUNTS = {
 SECTION_TITLES = {"warm": "Warm-up", "main": "Main moves", "cool": "Cool-down"}
 REPEAT = "Repeat the main moves {n} times, resting a little between."
 
-FOCUS_LABELS = {"strength": "Strength", "walk": "Walking", "core": "Core and balance", "mobility": "Gentle movement"}
+FOCUS_LABELS = {
+    "strength": "Strength", "walk": "Walking", "core": "Core and balance", "mobility": "Gentle movement",
+    "cardio": "Cardio", "fun": "Dance and play",
+}
+
+# The four slices of the weekly "Move plate" in the app. Every focus belongs to one.
+SLICES = ("strength", "cardio", "mobility", "fun")
+FOCUS_SLICE = {"strength": "strength", "core": "strength", "walk": "cardio", "cardio": "cardio", "mobility": "mobility", "fun": "fun"}
+
+LEVEL_LABELS = {"easy": "Easy", "steady": "Steady", "strong": "Strong"}
+REST_LABEL = "Rest"
 
 # id: (name, how to do it). Plain, widely taught moves a beginner can do at home.
 EXERCISES: dict[str, tuple[str, str]] = {
@@ -52,6 +62,19 @@ EXERCISES: dict[str, tuple[str, str]] = {
     "quad_stretch": ("Standing quad stretch", "Hold a wall, bring one heel toward your seat and keep your knees together."),
     "childs_pose": ("Child's pose", "Sit back on your heels with your arms stretched forward and rest."),
     "breathing": ("Slow breathing", "Breathe in for four counts and out for six."),
+    "step_touch": ("Step touch", "Step to the side, bring your feet together and swing your arms. Switch sides."),
+    "knee_lift": ("Gentle high knees", "Lift each knee toward your waist at a pace you can keep up."),
+    "shadow_box": ("Shadow boxing", "Stand tall and punch forward in a steady rhythm, one arm at a time."),
+    "step_jack": ("Step jacks", "Step one foot out and reach both arms up, then step back. Switch sides."),
+    "free_dance": ("Free dance", "Put on a song you love and move however feels good."),
+    "shake_out": ("Shake it out", "Shake your arms, then your legs, then everything."),
+    "cat_cow": ("Cat-cow", "On hands and knees, round your back, then lift your chest and look forward. Move with your breath."),
+    "spinal_twist": ("Gentle spinal twist", "Lie on your back, drop both knees to one side and rest. Switch sides."),
+    "neck_tilts": ("Neck tilts", "Tilt one ear toward your shoulder and hold gently. Switch sides."),
+    "bird_dog": ("Bird dog", "On hands and knees, reach one arm forward and the opposite leg back, hold, then switch."),
+    "wall_sit": ("Wall sit", "Lean your back on a wall, slide down to a comfortable squat and hold."),
+    "balance": ("Single-leg balance", "Stand on one foot next to a wall for support, hold, then switch."),
+    "hip_flexor": ("Hip stretch", "Kneel on one knee, tuck your hips under and lean forward gently."),
 }
 
 
@@ -73,6 +96,7 @@ class Routine:
     main: tuple[Step, ...]
     cool: tuple[Step, ...]
     rounds: int = 1
+    level: str = "easy"  # a key of LEVEL_LABELS
 
 
 ROUTINES: tuple[Routine, ...] = (
@@ -103,7 +127,7 @@ ROUTINES: tuple[Routine, ...] = (
             Step("glute_bridge", "reps", 12), Step("dead_bug", "reps_side", 6),
         ),
         cool=(Step("hamstring", "secs_side", 30), Step("childs_pose", "secs", 45), Step("breathing", "secs", 60)),
-        rounds=3,
+        rounds=3, level="steady",
     ),
     Routine(
         "core_15", "15-minute core and balance", 15, "core",
@@ -114,7 +138,7 @@ ROUTINES: tuple[Routine, ...] = (
             Step("glute_bridge", "reps", 12), Step("calf_raise", "reps", 12),
         ),
         cool=(Step("childs_pose", "secs", 45), Step("hamstring", "secs_side", 30), Step("breathing", "secs", 60)),
-        rounds=3,
+        rounds=3, level="steady",
     ),
     Routine(
         "walk_15", "15-minute walk", 15, "walk",
@@ -135,7 +159,7 @@ ROUTINES: tuple[Routine, ...] = (
             Step("quad_stretch", "secs_side", 30), Step("hamstring", "secs_side", 30),
             Step("childs_pose", "secs", 45), Step("breathing", "secs", 60),
         ),
-        rounds=4,
+        rounds=4, level="strong",
     ),
     Routine(
         "walk_30", "30-minute walk", 30, "walk",
@@ -143,6 +167,125 @@ ROUTINES: tuple[Routine, ...] = (
         warm=(Step("easy_walk", "mins", 5),),
         main=(Step("brisk_walk", "mins", 20),),
         cool=(Step("easy_walk", "mins", 5),),
+    ),
+    Routine(
+        "desk_2", "2-minute desk break", 2, "mobility",
+        "Loosen your neck and shoulders, even from a chair.",
+        warm=(Step("shoulder_rolls", "reps", 8),),
+        main=(Step("neck_tilts", "secs_side", 15), Step("side_reach", "reps_side", 4)),
+        cool=(Step("breathing", "secs", 30),),
+    ),
+    Routine(
+        "dance_3", "3-minute dance break", 3, "fun",
+        "One song, any moves you like.",
+        warm=(Step("shake_out", "secs", 30),),
+        main=(Step("free_dance", "secs", 120),),
+        cool=(Step("breathing", "secs", 30),),
+    ),
+    Routine(
+        "squat_3", "3-minute squat bite", 3, "strength",
+        "A few squats and a wall sit to wake your legs.",
+        warm=(Step("march", "secs", 30),),
+        main=(Step("squat", "reps", 8), Step("wall_sit", "secs", 20)),
+        cool=(Step("quad_stretch", "secs_side", 15),),
+        rounds=2,
+    ),
+    Routine(
+        "wake_3", "3-minute wake-up", 3, "cardio",
+        "Gentle steps and knee lifts to get you moving.",
+        warm=(Step("march", "secs", 30),),
+        main=(Step("step_touch", "secs", 30), Step("knee_lift", "secs", 20)),
+        cool=(Step("side_reach", "reps_side", 4),),
+        rounds=2,
+    ),
+    Routine(
+        "walk_10", "10-minute walk", 10, "walk",
+        "A short, steady walk.",
+        warm=(Step("easy_walk", "mins", 2),),
+        main=(Step("brisk_walk", "mins", 6),),
+        cool=(Step("easy_walk", "mins", 2),),
+    ),
+    Routine(
+        "cardio_10", "10-minute gentle cardio", 10, "cardio",
+        "Low-impact moves with no jumping, at a pace you can chat to.",
+        warm=(Step("march", "secs", 90),),
+        main=(
+            Step("step_touch", "secs", 40), Step("knee_lift", "secs", 30),
+            Step("shadow_box", "secs", 40), Step("step_jack", "secs", 30),
+        ),
+        cool=(Step("hamstring", "secs_side", 20), Step("breathing", "secs", 60)),
+        rounds=3,
+    ),
+    Routine(
+        "stretch_10", "10-minute full-body stretch", 10, "mobility",
+        "Slow stretches from your neck to your calves.",
+        warm=(Step("march", "secs", 60), Step("shoulder_rolls", "reps", 10)),
+        main=(
+            Step("neck_tilts", "secs_side", 20), Step("side_reach", "reps_side", 6),
+            Step("hamstring", "secs_side", 30), Step("quad_stretch", "secs_side", 30),
+            Step("hip_flexor", "secs_side", 30), Step("spinal_twist", "secs_side", 30),
+        ),
+        cool=(Step("childs_pose", "secs", 60), Step("breathing", "secs", 60)),
+    ),
+    Routine(
+        "flow_10", "10-minute slow flow", 10, "mobility",
+        "Unhurried moves linked with your breathing.",
+        warm=(Step("breathing", "secs", 60), Step("shoulder_rolls", "reps", 10)),
+        main=(
+            Step("cat_cow", "reps", 8), Step("bird_dog", "reps_side", 6),
+            Step("spinal_twist", "secs_side", 30), Step("childs_pose", "secs", 30),
+        ),
+        cool=(Step("hamstring", "secs_side", 30), Step("breathing", "secs", 60)),
+        rounds=2,
+    ),
+    Routine(
+        "balance_10", "10-minute balance and core", 10, "core",
+        "Steady balance and core work, one thing at a time.",
+        warm=(Step("march", "secs", 60), Step("hip_circles", "reps_side", 6)),
+        main=(
+            Step("balance", "secs_side", 30), Step("dead_bug", "reps_side", 6),
+            Step("bird_dog", "reps_side", 6), Step("plank", "secs", 25),
+        ),
+        cool=(Step("childs_pose", "secs", 45), Step("breathing", "secs", 45)),
+        rounds=2, level="steady",
+    ),
+    Routine(
+        "play_5", "5-minute play break", 5, "fun",
+        "Shake, step and dance a little, just for fun.",
+        warm=(Step("shake_out", "secs", 30),),
+        main=(Step("free_dance", "secs", 60), Step("step_jack", "secs", 20), Step("shadow_box", "secs", 20)),
+        cool=(Step("breathing", "secs", 30),),
+        rounds=2,
+    ),
+    Routine(
+        "dance_15", "15-minute dance party", 15, "fun",
+        "Dance, shadow box and step along to a song or two.",
+        warm=(Step("shake_out", "secs", 60), Step("step_touch", "secs", 60)),
+        main=(Step("free_dance", "secs", 120), Step("step_jack", "secs", 30), Step("shadow_box", "secs", 30)),
+        cool=(Step("hamstring", "secs_side", 20), Step("breathing", "secs", 60)),
+        rounds=4, level="steady",
+    ),
+    Routine(
+        "cardio_20", "20-minute steady cardio", 20, "cardio",
+        "Four rounds of low-impact cardio.",
+        warm=(Step("march", "secs", 120),),
+        main=(
+            Step("step_touch", "secs", 60), Step("knee_lift", "secs", 45),
+            Step("shadow_box", "secs", 60), Step("step_jack", "secs", 45),
+        ),
+        cool=(Step("hamstring", "secs_side", 30), Step("breathing", "secs", 60)),
+        rounds=4, level="steady",
+    ),
+    Routine(
+        "strength_20", "20-minute strength", 20, "strength",
+        "Bodyweight strength with rests between rounds.",
+        warm=(Step("march", "secs", 120), Step("shoulder_rolls", "reps", 10), Step("hip_circles", "reps_side", 8)),
+        main=(
+            Step("squat", "reps", 10), Step("wall_pushup", "reps", 10), Step("glute_bridge", "reps", 12),
+            Step("reverse_lunge", "reps_side", 6), Step("dead_bug", "reps_side", 6),
+        ),
+        cool=(Step("quad_stretch", "secs_side", 30), Step("childs_pose", "secs", 45), Step("breathing", "secs", 45)),
+        rounds=4, level="steady",
     ),
 )
 
@@ -211,14 +354,83 @@ def render(routine: Routine, lang: str = "en") -> dict:
         "summary": t(lang, routine.summary),
         "sections": sections,
         "safety": t(lang, SAFETY),
+        # For the Workouts tab (the coach card ignores these).
+        "minutes": routine.minutes,
+        "slice": slice_of(routine),
+        "level": routine.level,
+        "level_label": t(lang, LEVEL_LABELS[routine.level]),
+        "rounds": routine.rounds,
+        "play": play_steps(routine, lang),
     }
+
+
+def slice_of(routine: Routine) -> str:
+    """Which slice of the weekly Move plate this routine fills."""
+    return FOCUS_SLICE[routine.focus]
+
+
+def card(routine: Routine, lang: str = "en") -> dict:
+    """One routine as a card in the library (no steps)."""
+    return {
+        "id": routine.id,
+        "name": t(lang, routine.name),
+        "minutes": routine.minutes,
+        "focus": t(lang, FOCUS_LABELS[routine.focus]),
+        "slice": slice_of(routine),
+        "level": routine.level,
+        "level_label": t(lang, LEVEL_LABELS[routine.level]),
+        "summary": t(lang, routine.summary),
+    }
+
+
+def library(lang: str = "en") -> dict:
+    """Everything the Workouts tab lists, shortest first."""
+    ordered = sorted(ROUTINES, key=lambda r: (r.minutes, r.id))
+    return {"routines": [card(r, lang) for r in ordered], "slices": list(SLICES)}
+
+
+def _play_entries(lang: str, section: str, step: Step, round_no: int | None) -> list[dict]:
+    """One step as what the player shows. A step done on each side becomes two
+    timed steps; a rep step stays one (the amount already says "each side")."""
+    name, cue = EXERCISES[step.exercise]
+    base = {
+        "section": section, "round": round_no, "name": t(lang, name), "cue": t(lang, cue),
+        "amount": t(lang, AMOUNTS[step.kind], n=step.n),
+    }
+    if step.kind == "secs":
+        return [{**base, "mode": "timed", "seconds": step.n, "reps": None, "side": None}]
+    if step.kind == "secs_side":
+        return [{**base, "mode": "timed", "seconds": step.n, "reps": None, "side": side} for side in (1, 2)]
+    if step.kind == "mins":
+        return [{**base, "mode": "timed", "seconds": step.n * 60, "reps": None, "side": None}]
+    return [{**base, "mode": "reps", "seconds": None, "reps": step.n, "side": None}]
+
+
+def play_steps(routine: Routine, lang: str = "en") -> list[dict]:
+    """The routine as one flat list for the player: warm-up, the main moves
+    round after round with a short rest between rounds, then the cool-down."""
+    out: list[dict] = []
+    for step in routine.warm:
+        out += _play_entries(lang, "warm", step, None)
+    for round_no in range(1, routine.rounds + 1):
+        for step in routine.main:
+            out += _play_entries(lang, "main", step, round_no)
+        if routine.rounds > 1:
+            out.append({
+                "section": "main", "round": round_no, "mode": "rest", "name": t(lang, REST_LABEL), "cue": "",
+                "amount": t(lang, AMOUNTS["secs"], n=REST_SECONDS_PER_ROUND),
+                "seconds": REST_SECONDS_PER_ROUND, "reps": None, "side": None,
+            })
+    for step in routine.cool:
+        out += _play_entries(lang, "cool", step, None)
+    return out
 
 
 def every_phrase() -> set[str]:
     """Every English phrase this file can send, so a test can insist each one
     has a translation (the phrases are passed to t() by variable, which the
     literal-scanning test cannot see)."""
-    phrases = {SAFETY, REPEAT, *AMOUNTS.values(), *SECTION_TITLES.values(), *FOCUS_LABELS.values()}
+    phrases = {SAFETY, REPEAT, REST_LABEL, *AMOUNTS.values(), *SECTION_TITLES.values(), *FOCUS_LABELS.values(), *LEVEL_LABELS.values()}
     for name, cue in EXERCISES.values():
         phrases |= {name, cue}
     for r in ROUTINES:
