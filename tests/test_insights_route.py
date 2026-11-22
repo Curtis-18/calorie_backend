@@ -1,5 +1,5 @@
 import uuid
-from datetime import date as date_type, datetime, timezone
+from datetime import date as date_type, datetime, timedelta, timezone
 
 from app.routers import insights as insights_router
 from app.routers.insights import _as_utc, _utcnow_naive
@@ -347,3 +347,107 @@ async def test_only_a_real_generation_is_counted_not_a_cache_hit(monkeypatch):
     tasks = BackgroundTasks()
     out = await insights_router.get_insights(refresh=False, background=tasks, user_id=uuid.uuid4(), db=FakeDb(Cached()), lang="en")
     assert out.narrative == "old" and tasks.tasks == []
+
+
+# ---- targets changed after the narrative was written ----------------------------------------------------------
+
+class _Nested:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _db_with(cached, targets_updated_at):
+    """First read: the cache row; the targets read: [targets_updated_at]."""
+
+    class _Result:
+        def __init__(self, value):
+            self.value = value
+
+        def scalar_one_or_none(self):
+            return self.value
+
+    class FakeDb:
+        async def execute(self, stmt):
+            if "targets" in str(stmt):
+                return _Result(targets_updated_at)
+            return _Result(cached)
+
+        def begin_nested(self):
+            return _Nested()
+
+        async def commit(self):
+            pass
+
+        async def rollback(self):
+            pass
+
+    return FakeDb()
+
+
+def _cached(generated_at):
+    class Cached:
+        date = datetime.now(timezone.utc).date()
+        payload = {"narrative": "old targets", "tips": [], "weekly_trend": _trend()}
+
+    Cached.generated_at = generated_at
+    return Cached()
+
+
+async def test_targets_changed_since_compares_with_when_the_text_was_written():
+    written = datetime(2026, 11, 22, 8, 0, 0)  # naive UTC, as read back
+    uid = uuid.uuid4()
+    later = datetime(2026, 11, 22, 9, 0, 0, tzinfo=timezone.utc)
+    earlier = datetime(2026, 11, 22, 7, 0, 0, tzinfo=timezone.utc)
+    assert await insights_router._targets_changed_since(_db_with(None, later), uid, written) is True
+    assert await insights_router._targets_changed_since(_db_with(None, earlier), uid, written) is False
+    assert await insights_router._targets_changed_since(_db_with(None, None), uid, written) is False
+
+
+async def test_a_database_error_reading_targets_never_breaks_insights():
+    class Broken:
+        def begin_nested(self):
+            return _Nested()
+
+        async def execute(self, stmt):
+            raise RuntimeError("boom")
+
+    assert await insights_router._targets_changed_since(Broken(), uuid.uuid4(), datetime(2026, 11, 22)) is False
+
+
+async def test_new_targets_make_the_cached_narrative_stale(monkeypatch):
+    generated = []
+
+    async def same_trend(db, user_id, today):
+        return _trend()
+
+    async def new_insights(db, user_id, trend, today, lang="en"):
+        generated.append(1)
+        return {"narrative": "new targets", "tips": [], "weekly_trend": trend, "language": lang}
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", same_trend)
+    monkeypatch.setattr(insights_router, "generate_insights", new_insights)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    # Text written a minute ago; targets saved 10 seconds ago.
+    db = _db_with(_cached(now - timedelta(minutes=1)), (now - timedelta(seconds=10)).replace(tzinfo=timezone.utc))
+    out = await insights_router.get_insights(user_id=uuid.uuid4(), db=db, lang="en")
+    assert generated == [1] and out.narrative == "new targets"
+
+
+async def test_unchanged_targets_keep_serving_the_cached_narrative(monkeypatch):
+    async def same_trend(db, user_id, today):
+        return _trend()
+
+    async def boom(*a, **k):
+        raise AssertionError("must not regenerate")
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", same_trend)
+    monkeypatch.setattr(insights_router, "generate_insights", boom)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    db = _db_with(_cached(now - timedelta(minutes=1)), (now - timedelta(hours=5)).replace(tzinfo=timezone.utc))
+    out = await insights_router.get_insights(user_id=uuid.uuid4(), db=db, lang="en")
+    assert out.narrative == "old targets"

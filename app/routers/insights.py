@@ -15,6 +15,7 @@ from app.core.language import get_language
 from app.core.rate_limit import insight_generations
 from app.core.security import get_current_user_id
 from app.models.insights_cache import InsightsCache
+from app.models.target import Target
 from app.schemas.insights import InsightsOut
 from app.services import gemini_budget
 from app.services.insights_service import (
@@ -51,6 +52,23 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+async def _targets_changed_since(db: AsyncSession, user_id: uuid.UUID, generated_at: datetime) -> bool:
+    """Whether the person's targets were saved after the cached narrative was
+    written. Any trouble reading it counts as "no", so the cached text is
+    served as before rather than failing the screen."""
+    try:
+        async with db.begin_nested():
+            updated = (
+                await db.execute(select(Target.updated_at).where(Target.user_id == user_id))
+            ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001
+        log.warning("insights: could not read when targets last changed", exc_info=True)
+        return False
+    if updated is None:
+        return False
+    return _as_utc(updated) > _as_utc(generated_at)
+
+
 @router.get("", response_model=InsightsOut)
 async def get_insights(
     refresh: bool = False,
@@ -79,7 +97,9 @@ async def get_insights(
     if not refresh and cached and cached.date == today and cached.payload and same_language:
         unchanged = cached.payload.get("weekly_trend") == trend
         age = _utcnow_naive() - _as_utc(cached.generated_at).replace(tzinfo=None)
-        if unchanged or age < NARRATIVE_MAX_AGE:
+        # A narrative that talks about yesterday's targets must not outlive a
+        # change of targets (new weight, goal or activity level) by hours.
+        if (unchanged or age < NARRATIVE_MAX_AGE) and not await _targets_changed_since(db, user_id, cached.generated_at):
             payload = dict(cached.payload)
             payload["weekly_trend"] = trend
             return InsightsOut(**payload, generated_at=_as_utc(cached.generated_at))
