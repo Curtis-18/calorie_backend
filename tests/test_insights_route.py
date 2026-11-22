@@ -359,8 +359,8 @@ class _Nested:
         return False
 
 
-def _db_with(cached, targets_updated_at):
-    """First read: the cache row; the targets read: [targets_updated_at]."""
+def _db_with(cached, targets_updated_at, estimated=0):
+    """First read: the cache row; the targets read: [targets_updated_at]; the estimates count."""
 
     class _Result:
         def __init__(self, value):
@@ -371,7 +371,10 @@ def _db_with(cached, targets_updated_at):
 
     class FakeDb:
         async def execute(self, stmt):
-            if "targets" in str(stmt):
+            text = str(stmt)
+            if "food_log_estimates" in text:
+                return _Result(estimated)
+            if "targets" in text:
                 return _Result(targets_updated_at)
             return _Result(cached)
 
@@ -451,3 +454,35 @@ async def test_unchanged_targets_keep_serving_the_cached_narrative(monkeypatch):
     db = _db_with(_cached(now - timedelta(minutes=1)), (now - timedelta(hours=5)).replace(tzinfo=timezone.utc))
     out = await insights_router.get_insights(user_id=uuid.uuid4(), db=db, lang="en")
     assert out.narrative == "old targets"
+
+
+async def test_insights_report_how_many_entries_this_week_were_estimates(monkeypatch):
+    async def same_trend(db, user_id, today):
+        return _trend()
+
+    async def boom(*a, **k):
+        raise AssertionError("must not regenerate")
+
+    monkeypatch.setattr(insights_router, "get_weekly_trend", same_trend)
+    monkeypatch.setattr(insights_router, "generate_insights", boom)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    old_targets = (now - timedelta(hours=5)).replace(tzinfo=timezone.utc)
+    out = await insights_router.get_insights(
+        user_id=uuid.uuid4(), db=_db_with(_cached(now - timedelta(minutes=1)), old_targets, estimated=3), lang="en"
+    )
+    assert out.estimated_entries == 3
+    none = await insights_router.get_insights(
+        user_id=uuid.uuid4(), db=_db_with(_cached(now - timedelta(minutes=1)), old_targets, estimated=0), lang="en"
+    )
+    assert none.estimated_entries == 0
+
+
+async def test_a_failure_counting_estimates_never_breaks_insights():
+    class Broken:
+        def begin_nested(self):
+            return _Nested()
+
+        async def execute(self, stmt):
+            raise RuntimeError("relation food_log_estimates does not exist")
+
+    assert await insights_router._estimated_entries(Broken(), uuid.uuid4(), date_type(2026, 11, 22)) == 0

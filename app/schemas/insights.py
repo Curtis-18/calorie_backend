@@ -15,3 +15,7 @@ class InsightsOut(BaseModel):
     tips: list[str]
     weekly_trend: list[DayTrend]
     generated_at: datetime
+    # Entries in the 7 days shown whose numbers are an estimate (a dish with no
+    # database match). Lets the app say "some foods were estimated". 0 for an
+    # older backend or when it could not be read.
+    estimated_entries: int = 0

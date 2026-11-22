@@ -3,7 +3,7 @@ import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,8 @@ from app.core.features import Feature, record_usage, require_feature
 from app.core.language import get_language
 from app.core.rate_limit import insight_generations
 from app.core.security import get_current_user_id
+from app.models.food_log import FoodLog
+from app.models.food_log_estimate import FoodLogEstimate
 from app.models.insights_cache import InsightsCache
 from app.models.target import Target
 from app.schemas.insights import InsightsOut
@@ -69,6 +71,33 @@ async def _targets_changed_since(db: AsyncSession, user_id: uuid.UUID, generated
     return _as_utc(updated) > _as_utc(generated_at)
 
 
+async def _estimated_entries(db: AsyncSession, user_id: uuid.UUID, today: date_type) -> int:
+    """How many entries in the 7 days ending [today] carry an "estimated" mark.
+    Own savepoint and never raises: the table may not exist yet (migration not
+    run) and the line it feeds is a nicety."""
+    try:
+        async with db.begin_nested():
+            count = (
+                await db.execute(
+                    select(func.count())
+                    .select_from(FoodLogEstimate)
+                    .join(FoodLog, FoodLog.id == FoodLogEstimate.log_id)
+                    .where(
+                        FoodLog.user_id == user_id,
+                        FoodLog.log_date >= today - timedelta(days=6),
+                        FoodLog.log_date <= today,
+                    )
+                )
+            ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001
+        log.warning("insights: could not count estimated entries", exc_info=True)
+        return 0
+    try:
+        return max(0, int(count or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 @router.get("", response_model=InsightsOut)
 async def get_insights(
     refresh: bool = False,
@@ -91,6 +120,7 @@ async def get_insights(
     # logged food caused a Gemini call (the app reloads after each change). In
     # between, the cached text is served with the live chart.
     trend = await get_weekly_trend(db, user_id, today)
+    estimated = await _estimated_entries(db, user_id, today)
     # A cached answer is in the language it was written in; another language
     # needs a fresh one (an old cache without the marker is English).
     same_language = bool(cached and cached.payload) and cached.payload.get("language", "en") == lang
@@ -102,7 +132,7 @@ async def get_insights(
         if (unchanged or age < NARRATIVE_MAX_AGE) and not await _targets_changed_since(db, user_id, cached.generated_at):
             payload = dict(cached.payload)
             payload["weekly_trend"] = trend
-            return InsightsOut(**payload, generated_at=_as_utc(cached.generated_at))
+            return InsightsOut(**payload, generated_at=_as_utc(cached.generated_at), estimated_entries=estimated)
 
     try:
         # Each generation is a paid Gemini call, and `refresh=true` forces one.
@@ -125,10 +155,10 @@ async def get_insights(
             payload = dict(cached.payload)
             payload["weekly_trend"] = trend
             return InsightsOut(
-                **payload, generated_at=_as_utc(cached.generated_at)
+                **payload, generated_at=_as_utc(cached.generated_at), estimated_entries=estimated
             )
         return InsightsOut(
-            **degraded_insights(trend, lang), generated_at=datetime.now(timezone.utc)
+            **degraded_insights(trend, lang), generated_at=datetime.now(timezone.utc), estimated_entries=estimated
         )
 
     # Counted only for a real generation (cache hits cost nothing), after the
@@ -155,4 +185,4 @@ async def get_insights(
         await db.rollback()
         log.exception("failed to cache insights; returning the fresh result")
 
-    return InsightsOut(**payload, generated_at=now)
+    return InsightsOut(**payload, generated_at=now, estimated_entries=estimated)
