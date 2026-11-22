@@ -305,3 +305,35 @@ def test_the_migration_widens_the_report_kinds_and_turns_on_rls():
     sql = open("migrations/2026-11-14_messages.sql").read()
     assert "'message'" in sql and "content_reports_kind_check" in sql
     assert "enable row level security" in sql
+
+
+# --- the notification for a new message ---------------------------------------
+
+@pytest.fixture
+def pushed(monkeypatch):
+    calls = []
+
+    async def fake(user_id, kind, from_id, *, dedupe_key=None, **ctx):
+        calls.append((user_id, kind.value, from_id, dedupe_key, ctx))
+
+    monkeypatch.setattr("app.routers.messages.notify_from", fake)
+    return calls
+
+
+def test_a_sent_message_nudges_the_friend_once_an_hour_and_never_carries_the_text(client, pushed):
+    _with_db(_Db(_Result(None), FRIEND))
+    client.post(f"/messages/with/{SAM}", json={"id": str(uuid.uuid4()), "body": "secret plans"})
+    assert len(pushed) == 1
+    to, kind, by, key, ctx = pushed[0]
+    assert (to, kind, by) == (SAM, "message", ME)
+    assert key.startswith(f"msg:{ME}:{SAM}:") and len(key.rsplit(":", 1)[1]) == 10  # YYYYMMDDHH
+    assert "secret" not in repr(pushed) and ctx == {}
+
+
+def test_a_message_to_a_stranger_or_a_repeat_nudges_nobody(client, pushed):
+    _with_db(_Db(_Result(None), NOT_FRIEND))
+    client.post(f"/messages/with/{BEA}", json={"id": str(uuid.uuid4()), "body": "hi"})
+    mid = uuid.uuid4()
+    _with_db(_Db(_Result(_msg(ME, SAM, mid=mid))))
+    client.post(f"/messages/with/{SAM}", json={"id": str(mid), "body": "hi"})
+    assert pushed == []

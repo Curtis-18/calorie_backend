@@ -2,7 +2,7 @@ import logging
 import uuid
 from datetime import date as date_type, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -30,6 +30,8 @@ from app.services.friends_service import (
     relation_to,
     search_prefix,
 )
+from app.services.notification_rules import Kind
+from app.services.notifier import notify_from
 from app.services.snap_streaks import streaks_with
 from app.services.username_service import validate_username
 
@@ -257,6 +259,7 @@ async def search_people(
 @router.post("/friends/requests", response_model=RequestResultOut)
 async def send_request(
     data: FriendRequestIn,
+    background: BackgroundTasks,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
@@ -283,12 +286,20 @@ async def send_request(
         # Both of you asked at the same instant: the unique pair index won.
         await db.rollback()
         raise HTTPException(409, "Something changed while we were sending that. Please try again.")
+    # After the response, and never allowed to fail it. The day in the key lets
+    # a person who was declined ask again another day, without a repeat the same day.
+    day = datetime.now(timezone.utc).date().isoformat()
+    if outcome == Outcome.SEND:
+        background.add_task(notify_from, facts.target, Kind.FRIEND_REQUEST, user_id, dedupe_key=f"freq:{user_id}:{facts.target}:{day}")
+    elif outcome == Outcome.ACCEPT:
+        background.add_task(notify_from, facts.target, Kind.FRIEND_ACCEPTED, user_id, dedupe_key=f"facc:{user_id}:{facts.target}:{day}")
     return {"outcome": outcome.value, "username": target_name}
 
 
 @router.post("/friends/requests/{friendship_id}/accept", status_code=204)
 async def accept_request(
     friendship_id: uuid.UUID,
+    background: BackgroundTasks,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
@@ -308,12 +319,14 @@ async def accept_request(
     if blocked:
         raise HTTPException(409, MESSAGES[blocked])
 
+    asker = row.requester_id  # read before the commit expires the row
     await db.execute(
         update(Friendship)
         .where(Friendship.id == friendship_id)
         .values(status="accepted", responded_at=datetime.now(timezone.utc))
     )
     await db.commit()
+    background.add_task(notify_from, asker, Kind.FRIEND_ACCEPTED, user_id, dedupe_key=f"facc:{friendship_id}")
     return None
 
 

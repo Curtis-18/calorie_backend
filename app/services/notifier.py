@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.notification import DeviceToken, NotificationLog, NotificationPrefs
+from app.models.user import Profile
 from app.services import language_pref, push_sender
 from app.services.notification_rules import Kind, Prefs, copy_for, decide, local_day_bounds_utc
 
@@ -142,6 +143,19 @@ async def notify_user(user_id: uuid.UUID, kind: Kind, *, dedupe_key: str | None 
     try:
         async with async_session_maker() as db:
             return await notify(db, user_id, kind, dedupe_key=dedupe_key, **ctx)
+    except Exception:  # noqa: BLE001
+        log.exception("notification failed")
+        return "failed"
+
+
+async def notify_from(user_id: uuid.UUID, kind: Kind, from_id: uuid.UUID, *, dedupe_key: str | None = None, **ctx) -> str:
+    """`notify_user` for something a person did to another ("Sam wants to be
+    friends"): looks up the doer's username here, in the background, so the
+    request that caused it never pays for it. Never raises."""
+    try:
+        async with async_session_maker() as db:
+            name = (await db.execute(select(Profile.username).where(Profile.id == from_id))).scalar_one_or_none()
+            return await notify(db, user_id, kind, dedupe_key=dedupe_key, name=name or "A friend", **ctx)
     except Exception:  # noqa: BLE001
         log.exception("notification failed")
         return "failed"

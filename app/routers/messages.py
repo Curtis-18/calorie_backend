@@ -9,7 +9,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import aliased
@@ -27,6 +27,8 @@ from app.models.user import Profile
 from app.schemas.messages import ConversationOut, ConversationsOut, MessageIn, MessageOut, QuoteOut, ThreadOut
 from app.schemas.snaps import ReportIn
 from app.services import avatars
+from app.services.notification_rules import Kind
+from app.services.notifier import notify_from
 
 log = logging.getLogger("calorie_backend")
 
@@ -224,6 +226,7 @@ async def thread(
 async def send(
     friend_id: uuid.UUID,
     data: MessageIn,
+    background: BackgroundTasks,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
@@ -264,6 +267,10 @@ async def send(
         quotes = await load_quotes(db, [again.id], user_id)
         return _out(again, user_id, quote=quotes.get(again.id))
     quote = (await load_quotes(db, [message.id], user_id)).get(message.id) if quote_saved else None
+    # One nudge per sender per hour, so a back-and-forth is not a buzz per line,
+    # and the text itself never goes into the notification (a lock screen).
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    background.add_task(notify_from, friend_id, Kind.MESSAGE, user_id, dedupe_key=f"msg:{user_id}:{friend_id}:{hour}")
     return _out(message, user_id, quote=quote)
 
 

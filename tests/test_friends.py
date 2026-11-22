@@ -420,3 +420,53 @@ def test_search_is_rate_limited(client):
 
 def test_search_needs_a_signed_in_user(anon_client):
     assert anon_client.get("/friends/search", params={"q": "sa"}).status_code in (401, 403)
+
+
+# --- notifications for these events ------------------------------------------
+
+@pytest.fixture
+def pushed(monkeypatch):
+    calls = []
+
+    async def fake(user_id, kind, from_id, *, dedupe_key=None, **ctx):
+        calls.append((user_id, kind.value, from_id, dedupe_key))
+
+    monkeypatch.setattr("app.routers.friends.notify_from", fake)
+    return calls
+
+
+def test_a_new_request_tells_the_person_asked(client, monkeypatch, pushed):
+    _with_db(_Db())
+    _gathered(monkeypatch, facts())
+    assert client.post("/friends/requests", json={"username": "Sam"}).status_code == 200
+    assert len(pushed) == 1
+    to, kind, by, key = pushed[0]
+    assert (to, kind, by) == (SAM, "friend_request", ME) and key.startswith(f"freq:{ME}:{SAM}:")
+
+
+def test_asking_back_tells_the_other_person_it_was_accepted(client, monkeypatch, pushed):
+    _with_db(_Db(_Result()))
+    _gathered(monkeypatch, facts(existing=ExistingLink(SAM, "pending")), SimpleNamespace(id=uuid.uuid4()))
+    client.post("/friends/requests", json={"username": "sam"})
+    assert [(p[0], p[1], p[2]) for p in pushed] == [(SAM, "friend_accepted", ME)]
+
+
+def test_accepting_tells_the_person_who_asked(client, pushed):
+    fid = uuid.uuid4()
+    _with_db(_Db(_Result(SimpleNamespace(requester_id=SAM)), _Result(3), _Result(4), _Result()))
+    assert client.post(f"/friends/requests/{fid}/accept").status_code == 204
+    assert pushed == [(SAM, "friend_accepted", ME, f"facc:{fid}")]
+
+
+@pytest.mark.parametrize("f", [facts(target=None), facts(blocked_either_way=True), facts(existing=ExistingLink(ME, "pending"))])
+def test_nothing_is_sent_when_nothing_happened(client, monkeypatch, pushed, f):
+    _with_db(_Db())
+    _gathered(monkeypatch, f)
+    client.post("/friends/requests", json={"username": "sam"})
+    assert pushed == []
+
+
+def test_a_refused_accept_sends_nothing(client, pushed):
+    _with_db(_Db(_Result(None)))
+    assert client.post(f"/friends/requests/{uuid.uuid4()}/accept").status_code == 404
+    assert pushed == []

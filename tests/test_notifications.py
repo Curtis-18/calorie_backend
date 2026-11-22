@@ -420,3 +420,94 @@ def test_a_saved_row_without_choices_also_starts_everything_on():
     for name in ("friend_snaps", "reactions", "streak_reminders", "milestones"):
         assert cols[name].default.arg is True, name
     assert cols.paused_until.default is None
+
+
+# --- friends, messages and the extra fun copy ---------------------------------
+
+SOCIAL = [Kind.FRIEND_REQUEST, Kind.FRIEND_ACCEPTED, Kind.MESSAGE]
+
+
+@pytest.mark.parametrize("kind", SOCIAL)
+def test_social_kinds_follow_the_friends_switch_and_all_the_usual_rules(kind):
+    assert decide(kind, Prefs(), at(12), 0).allowed
+    assert decide(kind, Prefs(friend_snaps=False), at(12), 0).reason == "switched_off"
+    assert decide(kind, Prefs(), at(23), 0).reason == "quiet_hours"
+    assert decide(kind, Prefs(), at(12), DAILY_CAP).reason == "daily_cap"
+    assert decide(kind, Prefs(paused_until=at(20)), at(12), 0).reason == "paused"
+
+
+@pytest.mark.parametrize("kind", SOCIAL)
+def test_social_copy_names_the_person_when_it_has_one_and_is_varied(kind):
+    titles = set()
+    for i in range(40):
+        title, body = copy_for(kind, f"k{i}", name="sam")
+        titles.add(title)
+        assert "{" not in title + body
+    assert len(titles) == 3
+
+
+def test_a_message_notification_never_has_the_message_in_it():
+    for i in range(10):
+        title, body = copy_for(Kind.MESSAGE, f"k{i}", name="sam", text="secret plans")
+        assert "secret" not in (title + body).lower()
+
+
+def test_more_variety_in_the_existing_kinds():
+    for kind, n in [(Kind.FRIEND_SNAP, 5), (Kind.REACTION, 4), (Kind.LOG_REMINDER, 5), (Kind.MY_STREAK_AT_RISK, 4)]:
+        seen = {copy_for(kind, f"k{i}", name="sam", emoji="🔥", count=6)[0] for i in range(80)}
+        assert len(seen) >= n - 1, kind
+
+
+def test_every_new_line_is_translated_in_all_five_languages():
+    from app.i18n import TABLES
+    from app.services.notification_rules import _COPY
+
+    for lang in ("es", "fr", "de", "pt", "it"):
+        for kind in (*SOCIAL, Kind.FRIEND_SNAP, Kind.REACTION, Kind.LOG_REMINDER, Kind.MY_STREAK_AT_RISK):
+            for title, body in _COPY[kind]:
+                assert title in TABLES[lang] and body in TABLES[lang], (lang, title, body)
+                # placeholders survive translation, so nothing breaks at send time
+                for text, original in ((TABLES[lang][title], title), (TABLES[lang][body], body)):
+                    for ph in ("{name}", "{emoji}", "{count}"):
+                        assert (ph in text) == (ph in original), (lang, original)
+
+
+@pytest.mark.asyncio
+async def test_notify_from_never_raises_either(monkeypatch):
+    from app.services import notifier
+
+    class Broken:
+        async def __aenter__(self):
+            raise RuntimeError("db down")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(notifier, "async_session_maker", lambda: Broken())
+    assert await notifier.notify_from(ME, Kind.MESSAGE, SAM) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_notify_from_puts_the_doers_username_in_the_text(monkeypatch):
+    from app.services import notifier
+
+    seen = {}
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, stmt):
+            return SimpleNamespace(scalar_one_or_none=lambda: "sam")
+
+    async def fake_notify(db, user_id, kind, *, dedupe_key=None, **ctx):
+        seen.update(kind=kind, ctx=ctx, key=dedupe_key)
+        return "sent"
+
+    monkeypatch.setattr(notifier, "async_session_maker", lambda: Session())
+    monkeypatch.setattr(notifier, "notify", fake_notify)
+    assert await notifier.notify_from(ME, Kind.FRIEND_REQUEST, SAM, dedupe_key="k") == "sent"
+    assert seen == {"kind": Kind.FRIEND_REQUEST, "ctx": {"name": "sam"}, "key": "k"}

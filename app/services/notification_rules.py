@@ -33,6 +33,9 @@ class Kind(str, Enum):
     LOG_REMINDER = "log_reminder"          # nothing logged yet today
     MY_STREAK_AT_RISK = "my_streak_at_risk"  # your own logging streak ends tonight
     ANNOUNCEMENT = "announcement"          # one-off "what's new", sent by hand
+    FRIEND_REQUEST = "friend_request"      # someone asked to be your friend
+    FRIEND_ACCEPTED = "friend_accepted"    # someone said yes to your request
+    MESSAGE = "message"                    # a friend wrote to you (never shows the text)
 
 
 # Which preference switch controls which kind.
@@ -48,6 +51,12 @@ _SWITCH = {
     # Not about a friend or a streak: it has no switch of its own, but pause,
     # quiet hours and the daily cap all still apply.
     Kind.ANNOUNCEMENT: None,
+    # The friends switch ("Friend bites" in the app, now worded as friends in
+    # general): a new column would need a migration before every send could
+    # read the preferences, which is not worth the risk.
+    Kind.FRIEND_REQUEST: "friend_snaps",
+    Kind.FRIEND_ACCEPTED: "friend_snaps",
+    Kind.MESSAGE: "friend_snaps",
 }
 
 
@@ -113,10 +122,14 @@ _COPY: dict[Kind, list[tuple[str, str]]] = {
         ("🍜 {name} sent you a bite", "Take a look before it melts away."),
         ("👀 New bite from {name}", "What's on their plate? It's gone in 24 hours."),
         ("📸 {name} is eating something good", "Tap to peek."),
+        ("🍕 {name} shared a plate", "Come and have a look."),
+        ("🌮 Fresh bite from {name}", "Here for 24 hours."),
     ],
     Kind.REACTION: [
         ("{emoji} {name} reacted to your bite", "Your plate got noticed."),
         ("{name} sent {emoji}", "Somebody liked what they saw."),
+        ("🎉 {name} cheered your bite", "Your plate made someone smile."),
+        ("{emoji} from {name}", "Your bite made their day."),
     ],
     Kind.STREAK_AT_RISK: [
         ("🔥 Your {count}-day streak with {name} ends tonight", "One bite keeps it burning."),
@@ -133,11 +146,29 @@ _COPY: dict[Kind, list[tuple[str, str]]] = {
         ("🍽️ Nothing logged yet today", "Add what you've eaten so far, it takes a minute."),
         ("👋 Haven't logged anything today", "Tap in and add your first meal."),
         ("📝 Today's log is empty", "Log a meal to get your day going."),
+        ("🥗 What's on your plate today?", "Add a meal whenever you're ready."),
+        ("📸 Snap your next meal", "A photo takes five seconds."),
     ],
     Kind.MY_STREAK_AT_RISK: [
         ("🔥 Your {count}-day streak ends tonight", "Log a meal before midnight to keep it."),
         ("⏳ {count} days in a row, don't stop now", "One meal logged keeps your flame alive."),
         ("🚨 Streak alert: {count} days on the line", "Log something before the day ends."),
+        ("🔥 Keep the flame going", "{count} days so far. One meal keeps it."),
+    ],
+    Kind.FRIEND_REQUEST: [
+        ("👋 {name} wants to be friends", "Say yes and start swapping bites."),
+        ("🤝 New friend request", "{name} would like to share plates with you."),
+        ("✨ {name} wants to join your table", "Open the app to say yes."),
+    ],
+    Kind.FRIEND_ACCEPTED: [
+        ("🎉 {name} is now your friend", "Time to swap some bites."),
+        ("🥳 You and {name} are friends", "Send a bite to start a streak."),
+        ("🍽️ {name} said yes", "Your table just got bigger."),
+    ],
+    Kind.MESSAGE: [
+        ("💬 {name} sent you a message", "Tap to read it."),
+        ("✉️ New message from {name}", "Open the chat to see it."),
+        ("💌 {name} wrote to you", "Say something back."),
     ],
     Kind.MEAL_NUDGE: [
         ("🍽️ Time for a snack bite?", "A photo takes five seconds."),
