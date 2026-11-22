@@ -16,7 +16,7 @@ Today's target: {calorie_target} kcal, {protein_target}g protein, {carbs_target}
 Today so far: {today_calories} kcal, {today_protein}g protein, {today_carbs}g carbs, {today_fat}g fat.
 
 Last 7 days (date: calories/protein/carbs/fat):
-{trend_lines}
+{trend_lines}{movement_line}
 
 Rules for any numbers you mention:
 - Copy them exactly as given above. Never add, subtract, average or round them yourself, and never invent a figure.
@@ -25,6 +25,13 @@ Rules for any numbers you mention:
 
 Respond with ONLY a JSON object, no other text, in this exact shape:
 {{"narrative": "2-3 sentence summary of how today and this week are going"}}{language_rule}"""
+
+# Added only when they logged some movement this week, so the prompt is unchanged otherwise.
+MOVEMENT_LINE = (
+    "\n\nMovement this week (their own activity, only context): {minutes} min on {days} day(s). "
+    "You may mention it in a few warm words. It never changes how much they should eat: never suggest eating more or "
+    "less because of it, never give it a calorie value, and never say it burns or earns anything."
+)
 
 # Added only for a language other than English, so the English prompt is unchanged.
 LANGUAGE_RULE = "\nWrite the narrative in {language}. Keep the JSON key as shown, and keep every number as given."
@@ -78,7 +85,7 @@ def _day_name(iso_day: str, lang: str) -> str:
 
 
 async def generate_insights(
-    db: AsyncSession, user_id: str, trend: list[dict], today: date_type, lang: str = "en"
+    db: AsyncSession, user_id: str, trend: list[dict], today: date_type, lang: str = "en", movement: dict | None = None
 ) -> dict:
     target_result = await db.execute(select(Target).where(Target.user_id == user_id))
     target = target_result.scalar_one_or_none()
@@ -107,6 +114,11 @@ async def generate_insights(
         today_carbs=_n(today_totals["carbs_g"]),
         today_fat=_n(today_totals["fat_g"]),
         trend_lines=trend_lines,
+        movement_line=(
+            MOVEMENT_LINE.format(minutes=int(movement.get("week_minutes", 0)), days=int(movement.get("active_days", 0)))
+            if movement and movement.get("week_minutes")
+            else ""
+        ),
         language_rule=LANGUAGE_RULE.format(language=LANGUAGE_NAMES[lang]) if lang in LANGUAGE_NAMES and lang != "en" else "",
     )
 

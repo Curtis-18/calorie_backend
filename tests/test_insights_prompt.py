@@ -107,3 +107,33 @@ def test_the_degraded_answer_says_summary_not_tips_in_every_language():
         assert out["tips"] == []
         if lang == "en":
             assert "tips" not in out["narrative"].lower() and "summary" in out["narrative"]
+
+
+# ---- movement (Workouts tab) ------------------------------------------------------------------
+
+def test_the_prompt_is_unchanged_when_there_is_no_movement():
+    import asyncio
+
+    seen = {}
+
+    async def fake_generate(payload, kind=None):
+        seen["prompt"] = payload["contents"][0]["parts"][0]["text"]
+        return {"candidates": [{"content": {"parts": [{"text": '{"narrative": "ok"}'}]}}]}
+
+    from datetime import date
+    from unittest.mock import patch
+
+    from app.services import insights_service
+
+    trend = [{"date": "2026-11-25", "calories": 1000, "protein_g": 50, "carbs_g": 100, "fat_g": 30}]
+    with patch.object(insights_service, "generate_content", fake_generate):
+        asyncio.run(insights_service.generate_insights(_Db(), "u", trend, date(2026, 11, 25), "en"))
+        without = seen["prompt"]
+        asyncio.run(insights_service.generate_insights(_Db(), "u", trend, date(2026, 11, 25), "en", {"week_minutes": 0, "active_days": 0}))
+        assert seen["prompt"] == without
+        asyncio.run(insights_service.generate_insights(_Db(), "u", trend, date(2026, 11, 25), "en", {"week_minutes": 95, "active_days": 3}))
+        with_move = seen["prompt"]
+    assert "Movement" not in without
+    assert "95 min on 3 day(s)" in with_move
+    assert "never suggest eating more or less" in with_move
+    assert "never say it burns or earns anything" in with_move

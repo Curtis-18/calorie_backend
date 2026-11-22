@@ -27,7 +27,7 @@ from app.models.recipe import Recipe
 from app.models.target import Target
 from app.models.user_prefs import UserPrefs
 from app.routers.budget import _load_prefs as load_budget_prefs
-from app.services import coach_prompt, coach_service, meal_swaps, workouts
+from app.services import coach_prompt, coach_service, meal_swaps, movement_read, workouts
 from app.services.insights_service import get_weekly_trend
 from app.services.regions import region_label
 from app.services.target_calculator import MIN_CALORIES
@@ -195,6 +195,8 @@ async def _build_context(
     except Exception:  # noqa: BLE001
         log.warning("coach context: region or recipes unavailable", exc_info=True)
 
+    moved = await movement_read.week_snapshot(db, user_id, today)
+
     left_kcal = max(0, (allowance or target.calorie_target) - int(totals["calories"]))
     left_protein = max(0, target.protein_g - round(totals["protein_g"]))
     best_fits = meal_swaps.rank_fits(recipes, left_kcal, left_protein)
@@ -207,7 +209,7 @@ async def _build_context(
             for e in entries
         ],
         today_totals=totals, allowance_today=allowance, week=week, region=region, recipes=recipes,
-        best_fits=best_fits, routines=workouts.names(lang),
+        best_fits=best_fits, routines=workouts.names(lang), movement=moved,
     )
     return context, recipes
 

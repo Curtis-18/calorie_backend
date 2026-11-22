@@ -344,3 +344,62 @@ def test_every_route_needs_a_login():
     for method, path in [("get", "/movement"), ("get", "/movement/week"), ("get", "/movement/choices"),
                          ("post", "/movement"), ("delete", f"/movement/{uuid.uuid4()}")]:
         assert getattr(c, method)(path).status_code in (401, 403, 422), path
+
+
+# ---- the coach and Insights hear about movement, as context only --------------------------------
+
+import asyncio
+
+
+class _Rows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+
+def test_the_weekly_snapshot_adds_up_this_week_only():
+    from app.services import movement_read
+
+    rows = [(WED, "cardio", 30), (WED, "fun", 10), (d(-1), "strength", 20), (d(-4), "cardio", 99)]  # last one is last week
+    db = _Db(_Rows([r for r in rows if r[0] >= m.week_start(WED)]))
+    snap = asyncio.run(movement_read.week_snapshot(db, ME, WED))
+    assert snap == {"today_minutes": 40, "week_minutes": 60, "active_days": 2, "sessions": 3}
+
+
+def test_the_weekly_snapshot_never_raises_and_is_zero_without_the_table():
+    from app.services import movement_read
+
+    assert asyncio.run(movement_read.week_snapshot(_Db(fail_on=1), ME, WED)) == movement_read.NOTHING
+
+    class NoSavepoint:  # a fake that can't even open one
+        pass
+
+    assert asyncio.run(movement_read.week_snapshot(NoSavepoint(), ME, WED)) == movement_read.NOTHING
+
+
+def _context(movement):
+    from app.services import coach_prompt
+
+    return coach_prompt.build_context(
+        goal="lose", calorie_target=1800, floor=1500, protein_g=120, carbs_g=200, fat_g=60,
+        today_entries=[], today_totals={"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0},
+        allowance_today=None, week=[], region=None, recipes=[], movement=movement,
+    )
+
+
+def test_the_coach_is_told_the_movement_only_when_there_is_some():
+    assert "Movement they logged" not in _context(None)
+    assert "Movement they logged" not in _context({"today_minutes": 0, "week_minutes": 0, "active_days": 0})
+    text = _context({"today_minutes": 25, "week_minutes": 80, "active_days": 3})
+    assert "today 25 min; this week 80 min on 3 day(s)" in text
+    # Never a calorie figure for it.
+    assert not re.search(r"movement[^\n]*kcal", text, re.I)
+
+
+def test_the_coach_rules_keep_movement_apart_from_food():
+    from app.services import coach_prompt
+
+    rule = coach_prompt.SYSTEM_PROMPT
+    assert "never suggest eating more or less because of it" in rule and "never give it a calorie value" in rule
