@@ -139,9 +139,14 @@ def test_the_report_route_reads_the_header(client, monkeypatch):
 
     app.dependency_overrides[get_db] = lambda: _Db()
     monkeypatch.setattr(reports, "build_report", spy)
-    body = client.get("/reports/weekly", params={"date": "2026-11-20"}, headers={"Accept-Language": "fr-CA,fr;q=0.9"}).json()
+    # The route only accepts a device date within a day of the server's UTC date,
+    # so a fixed date here would start failing as soon as the calendar moved on.
+    from datetime import datetime, timezone
+
+    day = datetime.now(timezone.utc).date().isoformat()
+    body = client.get("/reports/weekly", params={"date": day}, headers={"Accept-Language": "fr-CA,fr;q=0.9"}).json()
     assert seen["lang"] == "fr" and body["message"].startswith("Une nouvelle semaine")
-    assert client.get("/reports/weekly", params={"date": "2026-11-20"}).json()["message"].startswith("A fresh week")
+    assert client.get("/reports/weekly", params={"date": day}).json()["message"].startswith("A fresh week")
 
 
 # ---- badges ---------------------------------------------------------------------------------

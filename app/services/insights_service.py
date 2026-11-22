@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.food_log import FoodLog
 from app.i18n import LANGUAGE_NAMES, t
+from app.i18n.dates import day_label
 from app.models.target import Target
 from app.services.gemini_client import generate_content
 
@@ -61,6 +62,21 @@ async def get_weekly_trend(db: AsyncSession, user_id: str, today: date_type) -> 
     return trend
 
 
+def _n(value) -> int:
+    """A nutrition amount as the whole number the app shows."""
+    try:
+        return int(round(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _day_name(iso_day: str, lang: str) -> str:
+    try:
+        return day_label(date_type.fromisoformat(iso_day), lang)
+    except (TypeError, ValueError):
+        return str(iso_day)
+
+
 async def generate_insights(
     db: AsyncSession, user_id: str, trend: list[dict], today: date_type, lang: str = "en"
 ) -> dict:
@@ -72,9 +88,12 @@ async def generate_insights(
         "calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0,
     }
 
+    # The model is told to copy these exactly, so they are written the way the
+    # app shows them (whole grams, "Wed 18 Nov"), never as raw sums of floats
+    # ("43.090999999999994g") or ISO dates.
     trend_lines = "\n".join(
-        f"{t['date']}: {t['calories']} kcal, {t['protein_g']}g protein, "
-        f"{t['carbs_g']}g carbs, {t['fat_g']}g fat"
+        f"{_day_name(t['date'], lang)}: {_n(t['calories'])} kcal, {_n(t['protein_g'])}g protein, "
+        f"{_n(t['carbs_g'])}g carbs, {_n(t['fat_g'])}g fat"
         for t in trend
     )
 
@@ -83,10 +102,10 @@ async def generate_insights(
         protein_target=target.protein_g if target else "not set",
         carbs_target=target.carbs_g if target else "not set",
         fat_target=target.fat_g if target else "not set",
-        today_calories=today_totals["calories"],
-        today_protein=today_totals["protein_g"],
-        today_carbs=today_totals["carbs_g"],
-        today_fat=today_totals["fat_g"],
+        today_calories=_n(today_totals["calories"]),
+        today_protein=_n(today_totals["protein_g"]),
+        today_carbs=_n(today_totals["carbs_g"]),
+        today_fat=_n(today_totals["fat_g"]),
         trend_lines=trend_lines,
         language_rule=LANGUAGE_RULE.format(language=LANGUAGE_NAMES[lang]) if lang in LANGUAGE_NAMES and lang != "en" else "",
     )
