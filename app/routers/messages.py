@@ -26,7 +26,7 @@ from app.models.story import ContentReport
 from app.models.user import Profile
 from app.schemas.messages import ConversationOut, ConversationsOut, MessageIn, MessageOut, QuoteOut, ThreadOut
 from app.schemas.snaps import ReportIn
-from app.services import avatars
+from app.services import avatars, recipe_photos
 from app.services.notification_rules import Kind
 from app.services.notifier import notify_from
 
@@ -117,10 +117,32 @@ async def load_attachments(db: AsyncSession, message_ids: list[uuid.UUID]) -> di
                     )
                 )
             ).all()
-        return {mid: att for mid, att in rows if att}
+        found = {mid: att for mid, att in rows if att}
     except Exception:  # noqa: BLE001
         log.warning("could not read message attachments", exc_info=True)
         return {}
+    return await _with_recipe_photos(db, found)
+
+
+async def _with_recipe_photos(db: AsyncSession, found: dict[uuid.UUID, dict]) -> dict[uuid.UUID, dict]:
+    """Put the recipe's cover on its card. The card is saved JSON and a photo link
+    expires, so the link is made fresh each time a thread is read. No photo, a
+    deleted recipe or any trouble just leaves the card as it was."""
+    wanted: dict[uuid.UUID, uuid.UUID] = {}
+    for mid, att in found.items():
+        if att.get("kind") == "recipe":
+            try:
+                wanted[mid] = uuid.UUID(str(att.get("id")))
+            except ValueError:
+                continue
+    if not wanted:
+        return found
+    try:
+        links = await recipe_photos.covers(db, list(wanted.values()))
+    except Exception:  # noqa: BLE001
+        log.warning("could not read recipe covers for chat cards", exc_info=True)
+        return found
+    return {mid: ({**att, "photo_url": links[wanted[mid]]} if wanted.get(mid) in links else att) for mid, att in found.items()}
 
 
 async def _friend_ids(db: AsyncSession, me: uuid.UUID) -> set[uuid.UUID]:
