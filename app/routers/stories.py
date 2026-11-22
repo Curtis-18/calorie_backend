@@ -26,6 +26,7 @@ from app.schemas.stories import StoryFeedOut, StoryIn, StoryPostedOut
 from app.services import avatars, storage_service
 from app.services.images import decode_photo
 from app.services.notification_rules import Kind
+from app.services.activity import record as record_activity
 from app.services.notifier import notify_user
 from app.services.snap_streaks import streaks_with
 from app.services.storage_service import StorageUnavailable
@@ -308,6 +309,7 @@ async def react(
         notify_user, owner, Kind.REACTION,
         dedupe_key=f"story-react:{story_id}:{user_id}:{data.emoji}", name=my_name, emoji=data.emoji,
     )
+    background.add_task(record_activity, owner, "reaction", user_id, emoji=data.emoji, dedupe_key=f"story-react:{story_id}:{user_id}:{data.emoji}")
     return None
 
 

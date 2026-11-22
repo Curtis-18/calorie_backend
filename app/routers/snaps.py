@@ -29,6 +29,7 @@ from app.schemas.snaps import (
 from app.services import storage_service
 from app.services.images import image_type  # noqa: F401 - used below and by tests
 from app.services.notification_rules import Kind
+from app.services.activity import record as record_activity
 from app.services.notifier import notify_user
 from app.services.snap_streaks import streaks_with
 from app.services.storage_service import StorageUnavailable
@@ -194,6 +195,8 @@ async def send_snap(
     for r in recipients:
         # After the response, and never allowed to fail the send.
         background.add_task(notify_user, r, Kind.FRIEND_SNAP, dedupe_key=f"snap:{data.id}", name=sender_name)
+        # The in-app Notifications list, for everybody (push only reaches a device that turned it on).
+        background.add_task(record_activity, r, "bite", user_id, dedupe_key=f"snap:{data.id}")
     return {"snap_id": data.id, "expires_at": expires, "recipients": summaries}
 
 
@@ -337,6 +340,7 @@ async def react(
     background.add_task(
         notify_user, sender, Kind.REACTION, dedupe_key=f"react:{snap_id}:{user_id}:{data.emoji}", name=my_name, emoji=data.emoji
     )
+    background.add_task(record_activity, sender, "reaction", user_id, emoji=data.emoji, dedupe_key=f"react:{snap_id}:{user_id}:{data.emoji}")
     return None
 
 

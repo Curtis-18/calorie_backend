@@ -314,3 +314,42 @@ def test_someone_no_longer_a_friend_cannot_react_but_can_still_report(client):
     _with_db(db)
     assert client.post(f"/snaps/{sid}/report", json={"reason": "spam"}).status_code == 204
     assert db.committed and db.added[0].reported_user_id == SAM
+
+
+# --- the in-app Notifications list -------------------------------------------
+
+@pytest.fixture
+def recorded(monkeypatch):
+    calls = []
+
+    async def fake(user_id, kind, actor_id, *, emoji=None, dedupe_key=None):
+        calls.append((user_id, kind, actor_id, emoji, dedupe_key))
+        return True
+
+    monkeypatch.setattr("app.routers.snaps.record_activity", fake)
+    return calls
+
+
+def test_sending_a_bite_adds_a_line_for_each_friend_who_gets_it(client, storage, recorded):
+    today = datetime.now(timezone.utc).date()
+    _with_db(_Db(_Result(None), _Result(rows=[(ME, SAM)]), _Result(), _Result(rows=[(SAM, "Sam")]),
+                 _Result(rows=[(ME, SAM, today)]), _Result(rows=[(ME, "Me")])))
+    sid = str(uuid.uuid4())
+    assert client.post("/snaps", json=body(id=sid)).status_code == 200
+    assert recorded == [(SAM, "bite", ME, None, f"snap:{sid}")]
+
+
+def test_reacting_to_a_bite_adds_a_line_for_its_sender(client, recorded):
+    sid = uuid.uuid4()
+    _with_db(_Db(_Result(SAM), _Result(rows=[(ME, SAM)]), _Result(), _Result(rows=[(ME, "Me")])))
+    assert client.post(f"/snaps/{sid}/react", json={"emoji": "🔥"}).status_code == 204
+    assert recorded == [(SAM, "reaction", ME, "🔥", f"react:{sid}:{ME}:🔥")]
+
+
+def test_a_refused_reaction_or_a_repeat_send_adds_nothing(client, storage, recorded):
+    _with_db(_Db(_Result(None)))
+    client.post(f"/snaps/{uuid.uuid4()}/react", json={"emoji": "🔥"})
+    existing = SimpleNamespace(id=uuid.uuid4(), sender_id=ME, expires_at=datetime.now(timezone.utc))
+    _with_db(_Db(_Result(existing), _Result(rows=[SAM]), _Result(rows=[(SAM, "Sam")]), _Result(rows=[])))
+    client.post("/snaps", json=body(id=str(existing.id)))
+    assert recorded == []

@@ -461,3 +461,22 @@ def test_deleting_an_account_works_before_the_migration(client, storage, monkeyp
     _with_db(_Db(snaps=_Result(rows=[f"{ME}/a.jpg"]), profiles=_Result()))
     assert client.delete("/me").status_code == 204
     assert storage["deleted"] == [f"{ME}/a.jpg"]
+
+
+def test_reacting_to_a_story_adds_a_line_for_its_owner(client, storage, monkeypatch):
+    calls = []
+
+    async def fake(user_id, kind, actor_id, *, emoji=None, dedupe_key=None):
+        calls.append((user_id, kind, actor_id, emoji))
+        return True
+
+    monkeypatch.setattr("app.routers.stories.record_activity", fake)
+    story_id = uuid.uuid4()
+    _with_db(_Db(stories=_Result(SAM), friendships=_Result(uuid.uuid4()), story_views=_Result(), profiles=_Result(rows=[(ME, "me")])))
+    assert client.post(f"/stories/{story_id}/react", json={"emoji": "🔥"}).status_code == 204
+    assert calls == [(SAM, "reaction", ME, "🔥")]
+    # Only viewing a story adds nothing.
+    calls.clear()
+    _with_db(_Db(stories=_Result(SAM), friendships=_Result(uuid.uuid4()), story_views=_Result()))
+    client.post(f"/stories/{story_id}/view")
+    assert calls == []
