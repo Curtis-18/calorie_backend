@@ -8,6 +8,8 @@ class StoryIn(BaseModel):
     id: uuid.UUID = Field(..., description="Chosen by the app so a retry can't post twice")
     image: str = Field(..., description="Base64 JPEG, PNG or WebP")
     caption: str | None = Field(None, max_length=120)
+    # Where the caption strip sits, as a fraction of the photo's height (0 top .. 1 bottom).
+    caption_y: float | None = Field(None, ge=0, le=1)
 
 
 class StoryPostedOut(BaseModel):
@@ -20,6 +22,7 @@ class StoryOut(BaseModel):
 
     story_id: uuid.UUID
     caption: str | None
+    caption_y: float | None = None
     created_at: datetime
     expires_at: datetime
     image_url: str | None  # None if a link couldn't be made; the app shows a placeholder
@@ -37,6 +40,7 @@ class ViewerOut(BaseModel):
 class MyStoryOut(BaseModel):
     story_id: uuid.UUID
     caption: str | None
+    caption_y: float | None = None
     created_at: datetime
     expires_at: datetime
     image_url: str | None

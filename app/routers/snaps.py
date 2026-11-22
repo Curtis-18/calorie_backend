@@ -26,7 +26,7 @@ from app.schemas.snaps import (
     SnapIn,
     SnapSentOut,
 )
-from app.services import storage_service
+from app.services import caption_pos, storage_service
 from app.services.images import image_type  # noqa: F401 - used below and by tests
 from app.services.notification_rules import Kind
 from app.services.activity import record as record_activity
@@ -174,6 +174,7 @@ async def send_snap(
             caption=(data.caption or "").strip() or None, expires_at=expires,
         ))
         await db.flush()
+        await caption_pos.save_snap(db, data.id, data.caption_y, (data.caption or "").strip())
         db.add_all(SnapRecipient(snap_id=data.id, recipient_id=r) for r in recipients)
         await db.execute(
             pg_insert(SnapDay)
@@ -221,6 +222,7 @@ async def inbox(
     rows = [(s, r) for s, r in rows if s.sender_id in friends]
     names = await _usernames(db, {s.sender_id for s, _ in rows})
     urls = await _sign([s.storage_path for s, _ in rows])
+    spots = await caption_pos.for_snaps(db, [s for s, _ in rows])
     background.add_task(purge_expired)
     return [
         {
@@ -228,6 +230,7 @@ async def inbox(
             "sender_id": s.sender_id,
             "sender_username": names.get(s.sender_id, ""),
             "caption": s.caption,
+            "caption_y": spots.get(s.id),
             "created_at": s.created_at,
             "expires_at": s.expires_at,
             "viewed": r.viewed_at is not None,
@@ -257,6 +260,7 @@ async def sent(
     ).scalars().all()
     names = await _usernames(db, {r.recipient_id for r in recips})
     urls = await _sign([s.storage_path for s in snaps])
+    spots = await caption_pos.for_snaps(db, snaps)
     by_snap: dict[uuid.UUID, list] = {}
     for r in recips:
         by_snap.setdefault(r.snap_id, []).append(
@@ -271,6 +275,7 @@ async def sent(
         {
             "snap_id": s.id,
             "caption": s.caption,
+            "caption_y": spots.get(s.id),
             "created_at": s.created_at,
             "expires_at": s.expires_at,
             "image_url": urls.get(s.storage_path),

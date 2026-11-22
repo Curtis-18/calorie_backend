@@ -11,6 +11,8 @@ class SnapIn(BaseModel):
     id: uuid.UUID = Field(..., description="Chosen by the app so a retry can't send twice")
     image: str = Field(..., description="Base64 JPEG, PNG or WebP")
     caption: str | None = Field(None, max_length=120)
+    # Where the caption strip sits, as a fraction of the photo's height (0 top .. 1 bottom).
+    caption_y: float | None = Field(None, ge=0, le=1)
     recipient_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=20)
     date: date_type | None = None  # the sender's device-local date
 
@@ -35,6 +37,7 @@ class InboxSnapOut(BaseModel):
     sender_id: uuid.UUID
     sender_username: str
     caption: str | None
+    caption_y: float | None = None
     created_at: datetime
     expires_at: datetime
     viewed: bool
@@ -52,6 +55,7 @@ class SentRecipientOut(BaseModel):
 class SentSnapOut(BaseModel):
     snap_id: uuid.UUID
     caption: str | None
+    caption_y: float | None = None
     created_at: datetime
     expires_at: datetime
     image_url: str | None

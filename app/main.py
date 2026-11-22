@@ -22,7 +22,7 @@ from app.routers import (
 
 # Import every model before the app serves traffic so Base.metadata knows
 # about all tables and FK targets resolve.
-from app.models import activity as activity_model, ai_usage, budget_prefs, coach_message, food_log, food_log_estimate, food_log_nutrients, friendship, insights_cache, message, movement as movement_model, notification, recipe, snap, story, target, user, user_language, user_prefs, weight_log  # noqa: F401
+from app.models import activity as activity_model, ai_usage, budget_prefs, caption_pos as caption_pos_model, coach_message, food_log, food_log_estimate, food_log_nutrients, friendship, insights_cache, message, movement as movement_model, notification, recipe, snap, story, target, user, user_language, user_prefs, weight_log  # noqa: F401
 
 log = logging.getLogger("calorie_backend")
 

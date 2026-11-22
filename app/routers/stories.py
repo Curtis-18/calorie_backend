@@ -23,7 +23,7 @@ from app.models.story import ContentReport, Story, StoryView
 from app.models.user import Profile
 from app.schemas.snaps import REACTIONS, ReactIn, ReportIn
 from app.schemas.stories import StoryFeedOut, StoryIn, StoryPostedOut
-from app.services import avatars, storage_service
+from app.services import avatars, caption_pos, storage_service
 from app.services.images import decode_photo
 from app.services.notification_rules import Kind
 from app.services.activity import record as record_activity
@@ -141,6 +141,9 @@ async def post_story(
             id=data.id, user_id=user_id, storage_path=path,
             caption=(data.caption or "").strip() or None, expires_at=expires,
         ))
+        if data.caption_y is not None and (data.caption or "").strip():
+            await db.flush()
+            await caption_pos.save_story(db, data.id, data.caption_y, (data.caption or "").strip())
         await db.commit()
     except Exception:  # noqa: BLE001
         await db.rollback()
@@ -199,6 +202,7 @@ async def feed(
     people = owners | {v.viewer_id for v in seen_mine}
     names = await _usernames(db, people)
     urls = await _sign([s.storage_path for s in stories])
+    spots = await caption_pos.for_stories(db, stories)
     streaks = {}
     if date is not None and owners:
         try:
@@ -221,13 +225,15 @@ async def feed(
     for s in stories:
         if s.user_id == user_id:
             mine.append({
-                "story_id": s.id, "caption": s.caption, "created_at": s.created_at, "expires_at": s.expires_at,
+                "story_id": s.id, "caption": s.caption, "caption_y": spots.get(s.id),
+                "created_at": s.created_at, "expires_at": s.expires_at,
                 "image_url": urls.get(s.storage_path), "viewers": viewers.get(s.id, []),
             })
         elif s.user_id in names:  # can't show someone with no name
             view = my_views.get(s.id)
             by_owner.setdefault(s.user_id, []).append({
-                "story_id": s.id, "caption": s.caption, "created_at": s.created_at, "expires_at": s.expires_at,
+                "story_id": s.id, "caption": s.caption, "caption_y": spots.get(s.id),
+                "created_at": s.created_at, "expires_at": s.expires_at,
                 "image_url": urls.get(s.storage_path), "viewed": view is not None,
                 "reaction": view.reaction if view else None,
             })

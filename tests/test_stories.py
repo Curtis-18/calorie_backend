@@ -71,6 +71,9 @@ class _Db:
     def add(self, obj):
         self.added.append(obj)
 
+    async def flush(self):
+        pass
+
     async def commit(self):
         if self.commit_error:
             raise self.commit_error
@@ -290,6 +293,62 @@ def test_posting_a_story_uploads_and_saves_it(client, storage):
     assert storage["uploads"] == [(f"{ME}/story-{story.id}.jpg", "image/jpeg")]
     lifetime = datetime.fromisoformat(r.json()["expires_at"]) - datetime.now(timezone.utc)
     assert timedelta(hours=23, minutes=59) < lifetime <= timedelta(hours=24)
+
+
+def test_a_caption_position_is_saved_with_the_story(client, storage):
+    from app.models.caption_pos import StoryCaptionPosition
+
+    db = _with_db(_Db(stories=[_Result(None), _Result(0)]))
+    assert _post(client, caption="lunch", caption_y=0.3).status_code == 200
+    story, spot = db.added
+    assert isinstance(spot, StoryCaptionPosition) and spot.story_id == story.id and spot.y == 0.3 and db.committed
+
+
+def test_a_position_without_a_caption_or_off_the_photo_is_not_kept(client, storage):
+    db = _with_db(_Db(stories=[_Result(None), _Result(0)]))
+    assert _post(client, caption_y=0.4).status_code == 200  # nothing to place
+    assert len(db.added) == 1
+    assert _post(client, caption="x", caption_y=1.5).status_code == 422
+    assert _post(client, caption="x", caption_y=-0.1).status_code == 422
+
+
+def test_a_story_still_posts_if_the_position_cannot_be_saved(client, storage):
+    class Broken(_Db):
+        def begin_nested(self):
+            raise RuntimeError('relation "story_caption_positions" does not exist')
+
+    db = _with_db(Broken(stories=[_Result(None), _Result(0)]))
+    r = _post(client, caption="lunch", caption_y=0.3)
+    assert r.status_code == 200 and db.committed and len(db.added) == 1
+
+
+def test_the_feed_carries_where_each_caption_sits(client, storage):
+    mine = _story(ME, minutes_ago=30, caption="breakfast")
+    sam_plain, sam_caption = _story(SAM, minutes_ago=50), _story(SAM, minutes_ago=10, caption="lunch")
+    _with_db(_Db(
+        friendships=_Result(rows=[(ME, SAM)]),
+        stories=_Result(rows=[sam_plain, mine, sam_caption]),
+        story_views=_Result(rows=[]),
+        profiles=_Result(rows=[(SAM, "sam")]),
+        profile_avatars=_Result(rows=[]),
+        story_caption_positions=_Result(rows=[(mine.id, 0.2), (sam_caption.id, 0.75)]),
+    ))
+    body = client.get("/stories").json()
+    assert body["mine"][0]["caption_y"] == 0.2
+    assert [s["caption_y"] for s in body["friends"][0]["stories"]] == [None, 0.75]
+
+
+def test_the_feed_does_not_ask_for_positions_when_nothing_has_a_caption(client, storage):
+    plain = _story(SAM, minutes_ago=5)
+    db = _with_db(_Db(
+        friendships=_Result(rows=[(ME, SAM)]),
+        stories=_Result(rows=[plain]),
+        story_views=_Result(rows=[]),
+        profiles=_Result(rows=[(SAM, "sam")]),
+        profile_avatars=_Result(rows=[]),
+    ))
+    assert client.get("/stories").json()["friends"][0]["stories"][0]["caption_y"] is None
+    assert not db.ran("SELECT story_caption_positions")
 
 
 def test_reposting_the_same_id_is_a_no_op(client, storage):

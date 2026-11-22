@@ -92,6 +92,14 @@ class _Result:
         return self.rows
 
 
+class _Savepoint:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class _Db:
     def __init__(self, *results):
         self.results = list(results)
@@ -108,6 +116,9 @@ class _Db:
 
     async def flush(self):
         pass
+
+    def begin_nested(self):
+        return _Savepoint()
 
     async def commit(self):
         self.committed = True
@@ -187,6 +198,33 @@ def test_a_good_snap_is_uploaded_saved_and_reports_the_streak(client, storage):
     assert storage["uploads"][0][0].startswith(f"{ME}/")
     assert db.committed
     assert db.added[0].caption == "yum"
+
+
+def _good_send_db():
+    today = datetime.now(timezone.utc).date()
+    return _Db(
+        _Result(None), _Result(rows=[(ME, SAM)]), _Result(), _Result(rows=[(SAM, "Sam")]),
+        _Result(rows=[(ME, SAM, today), (SAM, ME, today)]), _Result(rows=[(ME, "Me")]),
+    )
+
+
+def test_a_caption_position_is_saved_with_the_bite(client, storage):
+    from app.models.caption_pos import SnapCaptionPosition
+
+    db = _good_send_db()
+    _with_db(db)
+    assert client.post("/snaps", json=body(caption="yum", caption_y=0.25)).status_code == 200
+    snap, spot = db.added[0], db.added[1]
+    assert isinstance(spot, SnapCaptionPosition) and spot.snap_id == snap.id and spot.y == 0.25
+
+
+def test_a_position_without_a_caption_is_not_kept_and_off_the_photo_is_refused(client, storage):
+    db = _good_send_db()
+    _with_db(db)
+    assert client.post("/snaps", json=body(caption_y=0.4)).status_code == 200
+    assert not any(type(o).__name__ == "SnapCaptionPosition" for o in db.added)
+    assert client.post("/snaps", json=body(caption="x", caption_y=2)).status_code == 422
+    assert client.post("/snaps", json=body(caption="x", caption_y=-1)).status_code == 422
 
 
 def test_a_failed_save_removes_the_uploaded_photo(client, storage):
