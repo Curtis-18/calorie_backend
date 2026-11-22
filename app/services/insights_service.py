@@ -24,10 +24,10 @@ Rules for any numbers you mention:
 - If today so far is 0 kcal, say nothing has been logged yet today.
 
 Respond with ONLY a JSON object, no other text, in this exact shape:
-{{"narrative": "2-3 sentence summary of how today and this week are going", "tips": ["short actionable tip", "short actionable tip", "short actionable tip"]}}{language_rule}"""
+{{"narrative": "2-3 sentence summary of how today and this week are going"}}{language_rule}"""
 
 # Added only for a language other than English, so the English prompt is unchanged.
-LANGUAGE_RULE = "\nWrite the narrative and the tips in {language}. Keep the JSON keys as shown, and keep every number as given."
+LANGUAGE_RULE = "\nWrite the narrative in {language}. Keep the JSON key as shown, and keep every number as given."
 
 
 async def get_weekly_trend(db: AsyncSession, user_id: str, today: date_type) -> list[dict]:
@@ -125,11 +125,11 @@ async def generate_insights(
         raise RuntimeError("gemini returned an empty insights response")
     parsed = json.loads(raw_text)
 
-    tips = [t for t in (parsed.get("tips") or []) if isinstance(t, str)][:5]
-
     return {
         "narrative": parsed.get("narrative") or "",
-        "tips": tips,
+        # Tips were removed from the app. The field stays (empty) so a copy of
+        # the app that is still open, or cached, does not break on a missing key.
+        "tips": [],
         "weekly_trend": trend,
         "language": lang,  # so a cached answer is not served in another language
     }
@@ -138,25 +138,19 @@ async def generate_insights(
 FALLBACK_NARRATIVE = (
     "Your AI coach is taking a quick break — the analysis service is busy right "
     "now. Your week's trends are below; pull down to refresh in a moment for "
-    "fresh tips."
+    "a fresh summary."
 )
-
-FALLBACK_TIPS = [
-    "Log meals as you eat them so today's numbers stay accurate.",
-    "Include a protein source at every meal to stay full between them.",
-    "A glass of water before meals helps keep appetite in check.",
-]
 
 
 def degraded_insights(trend: list[dict], lang: str = "en") -> dict:
     """A usable payload when Gemini is unreachable.
 
     The weekly trend is computed from our own logs, so the chart still renders;
-    only the AI narrative and tips are replaced with an honest placeholder
-    instead of failing the whole request with a 500.
+    only the AI narrative is replaced with an honest placeholder instead of
+    failing the whole request with a 500.
     """
     return {
         "narrative": t(lang, FALLBACK_NARRATIVE),
-        "tips": [t(lang, tip) for tip in FALLBACK_TIPS],
+        "tips": [],
         "weekly_trend": trend,
     }

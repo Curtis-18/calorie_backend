@@ -88,7 +88,7 @@ def test_degraded_insights_keeps_the_local_trend():
     payload = degraded_insights(trend)
     assert payload["weekly_trend"] is trend
     assert payload["narrative"]
-    assert payload["tips"]
+    assert payload["tips"] == []  # removed from the app; the key stays so older copies do not break
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 504])

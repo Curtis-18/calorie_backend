@@ -46,11 +46,11 @@ def test_every_literal_passed_to_t_has_a_translation():
 
 def test_the_data_tables_are_covered():
     from app.services.adjustments import EXTRAS
-    from app.services.insights_service import FALLBACK_NARRATIVE, FALLBACK_TIPS
+    from app.services.insights_service import FALLBACK_NARRATIVE
     from app.services.notification_rules import _COPY
     from app.services.progress_service import ACHIEVEMENTS
 
-    phrases = {FALLBACK_NARRATIVE, *FALLBACK_TIPS, "Restaurant portion"}
+    phrases = {FALLBACK_NARRATIVE, "Restaurant portion"}
     phrases |= {a.title for a in ACHIEVEMENTS} | {a.description for a in ACHIEVEMENTS}
     phrases |= {e.label for e in EXTRAS} | {e.entry_name for e in EXTRAS}
     for options in _COPY.values():
@@ -352,7 +352,7 @@ async def test_the_insights_prompt_asks_for_the_language_only_when_it_is_not_eng
 
     async def fake_generate(payload, kind=None):
         prompts.append(payload["contents"][0]["parts"][0]["text"])
-        return {"candidates": [{"content": {"parts": [{"text": '{"narrative": "n", "tips": ["a"]}'}]}}]}
+        return {"candidates": [{"content": {"parts": [{"text": '{"narrative": "n"}'}]}}]}
 
     monkeypatch.setattr(insights_service, "generate_content", fake_generate)
 
@@ -375,7 +375,8 @@ def test_the_degraded_insights_are_translated():
     from app.services.insights_service import degraded_insights
 
     en, fr = degraded_insights([]), degraded_insights([], "fr")
-    assert fr["narrative"] != en["narrative"] and len(fr["tips"]) == 3 and fr["tips"] != en["tips"]
+    assert fr["narrative"] != en["narrative"]
+    assert fr["tips"] == en["tips"] == []  # tips were removed; the key stays empty for older copies of the app
 
 
 async def test_a_cached_narrative_in_another_language_is_not_served(monkeypatch):

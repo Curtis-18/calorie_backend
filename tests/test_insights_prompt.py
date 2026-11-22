@@ -82,3 +82,28 @@ def test_day_label_in_every_language():
         assert re.fullmatch(r"\S+ 18 \S+", label), (lang, label)
     assert day_label(TODAY, "xx") == "Wed 18 Nov"  # unknown language: English
     assert day_label(TODAY, "es") == "mié 18 nov" and day_label(TODAY, "fr") == "mer 18 nov"
+
+
+@pytest.mark.asyncio
+async def test_the_model_is_no_longer_asked_for_tips_and_the_answer_has_an_empty_tips_key(monkeypatch):
+    prompt = await _prompt(monkeypatch)
+    assert "tips" not in prompt.lower()
+    assert '"narrative"' in prompt
+
+    async def fake(payload, kind=None):
+        # A model that still sends tips (an old cached prompt, say): they are dropped.
+        return {"candidates": [{"content": {"parts": [{"text": json.dumps({"narrative": "ok", "tips": ["a", "b"]})}]}}]}
+
+    monkeypatch.setattr(insights_service, "generate_content", fake)
+    out = await insights_service.generate_insights(_Db(), "u1", _trend(), TODAY, "en")
+    assert out["tips"] == [] and out["narrative"] == "ok"
+
+
+def test_the_degraded_answer_says_summary_not_tips_in_every_language():
+    from app.i18n import SUPPORTED
+
+    for lang in SUPPORTED:
+        out = insights_service.degraded_insights([], lang)
+        assert out["tips"] == []
+        if lang == "en":
+            assert "tips" not in out["narrative"].lower() and "summary" in out["narrative"]
