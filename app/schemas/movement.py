@@ -59,3 +59,6 @@ class WeekOut(BaseModel):
     strength_days_goal: int
     week_moved: bool
     streak: int
+    # The opt-in share of today's rough estimates added to the day's plan (0 = off).
+    eat_back_percent: int = 0
+    eat_back_kcal: int = 0

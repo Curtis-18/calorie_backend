@@ -365,7 +365,7 @@ def test_the_weekly_snapshot_adds_up_this_week_only():
     rows = [(WED, "cardio", 30), (WED, "fun", 10), (d(-1), "strength", 20), (d(-4), "cardio", 99)]  # last one is last week
     db = _Db(_Rows([r for r in rows if r[0] >= m.week_start(WED)]))
     snap = asyncio.run(movement_read.week_snapshot(db, ME, WED))
-    assert snap == {"today_minutes": 40, "week_minutes": 60, "active_days": 2, "sessions": 3}
+    assert snap == {"today_minutes": 40, "week_minutes": 60, "active_days": 2, "sessions": 3, "eat_back_kcal": 0}
 
 
 def test_the_weekly_snapshot_never_raises_and_is_zero_without_the_table():
@@ -403,3 +403,108 @@ def test_the_coach_rules_keep_movement_apart_from_food():
 
     rule = coach_prompt.SYSTEM_PROMPT
     assert "never suggest eating more or less because of it" in rule and "never give it a calorie value" in rule
+
+
+# ---- adding movement to the calorie plan (opt-in, D11) -----------------------------------------------
+
+def test_off_means_nothing_is_added_whatever_was_logged():
+    assert m.eat_back_kcal(0, 900) == 0
+    assert m.eat_back_kcal(-5, 900) == 0
+
+
+def test_a_share_of_the_estimate_is_added_to_the_nearest_five():
+    assert m.eat_back_kcal(25, 200) == 50
+    assert m.eat_back_kcal(50, 200) == 100
+    assert m.eat_back_kcal(25, 190) == 50  # 47.5 -> 50
+    assert m.eat_back_kcal(25, 170) == 45  # 42.5 -> 45 (nearest 5)
+    assert m.eat_back_kcal(25, 0) == 0 and m.eat_back_kcal(50, -10) == 0
+
+
+def test_the_share_is_never_above_half_and_a_day_is_never_raised_by_more_than_the_cap():
+    assert m.eat_back_kcal(90, 200) == m.eat_back_kcal(50, 200) == 100
+    assert m.eat_back_kcal(50, 5000) == m.EAT_BACK_DAILY_CAP_KCAL == 500
+
+
+def test_the_extra_only_ever_grows_with_more_movement():
+    last = 0
+    for est in range(0, 3000, 50):
+        now = m.eat_back_kcal(50, est)
+        assert now >= last
+        last = now
+
+
+def test_the_choice_defaults_to_off_and_reads_back(client):
+    _with_db(_Db(_Result(None)))
+    body = client.get("/movement/prefs").json()
+    assert body == {"eat_back_percent": 0, "max_percent": 50, "daily_cap_kcal": 500}
+    _with_db(_Db(_Result(25)))
+    assert client.get("/movement/prefs").json()["eat_back_percent"] == 25
+    _with_db(_Db(fail_on=1))  # the table isn't there yet: off
+    assert client.get("/movement/prefs").json()["eat_back_percent"] == 0
+
+
+def test_the_choice_is_saved_between_zero_and_fifty_only(client):
+    db = _Db(_Result())
+    _with_db(db)
+    r = client.post("/movement/prefs", json={"eat_back_percent": 25})
+    assert r.status_code == 200 and r.json()["eat_back_percent"] == 25 and db.committed
+    assert any("movement_prefs" in s for s in db.statements)
+    for bad in (-1, 51, 100):
+        _with_db(_Db())
+        assert client.post("/movement/prefs", json={"eat_back_percent": bad}).status_code == 422
+
+
+def test_a_failed_save_of_the_choice_is_a_clean_503(client):
+    db = _Db(fail_on=1)
+    _with_db(db)
+    r = client.post("/movement/prefs", json={"eat_back_percent": 25})
+    assert r.status_code == 503 and db.rolled_back
+
+
+def test_the_week_carries_the_extra_only_when_it_is_on(client):
+    rows = [(today(), "cardio", 60)]
+    _with_db(_Db(_Result(rows=rows), _Result(25), _Result(120)))  # week rows, the choice, today's estimates
+    w = client.get("/movement/week").json()
+    assert (w["eat_back_percent"], w["eat_back_kcal"]) == (25, 30)
+    _with_db(_Db(_Result(rows=rows), _Result(0)))  # off: today's estimates are not even read
+    w = client.get("/movement/week").json()
+    assert (w["eat_back_percent"], w["eat_back_kcal"]) == (0, 0)
+
+
+def test_the_snapshot_quotes_the_extra_the_ring_shows():
+    from app.services import movement_read
+
+    db = _Db(_Rows([(WED, "cardio", 60)]), _Result(50), _Result(200))
+    snap = asyncio.run(movement_read.week_snapshot(db, ME, WED))
+    assert snap["eat_back_kcal"] == 100
+
+
+def test_the_coach_is_told_the_plan_already_includes_the_extra_and_must_not_add_it_again():
+    text = _context({"today_minutes": 40, "week_minutes": 80, "active_days": 3, "eat_back_kcal": 100})
+    assert "add 100 kcal from today's movement to today's plan" in text
+    assert "already includes it. Do not add anything yourself." in text
+    assert "kcal from today's movement" not in _context({"today_minutes": 40, "week_minutes": 80, "active_days": 3, "eat_back_kcal": 0})
+
+
+def test_insights_uses_the_same_adjusted_target(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from app.services import insights_service
+
+    seen = {}
+
+    async def fake_generate(payload, kind=None):
+        seen["prompt"] = payload["contents"][0]["parts"][0]["text"]
+        return {"candidates": [{"content": {"parts": [{"text": '{"narrative": "ok"}'}]}}]}
+
+    class Db:
+        async def execute(self, *_a, **_k):
+            return NS(scalar_one_or_none=lambda: NS(calorie_target=2000, protein_g=100, carbs_g=200, fat_g=60))
+
+    monkeypatch.setattr(insights_service, "generate_content", fake_generate)
+    trend = [{"date": "2026-11-25", "calories": 500, "protein_g": 30, "carbs_g": 50, "fat_g": 10}]
+    asyncio.run(insights_service.generate_insights(Db(), "u", trend, WED, "en", {"week_minutes": 80, "active_days": 3, "eat_back_kcal": 100}))
+    assert "Today's target: 2100 kcal" in seen["prompt"]
+    assert "already includes 100 kcal from movement that they chose to add" in seen["prompt"]
+    asyncio.run(insights_service.generate_insights(Db(), "u", trend, WED, "en", {"week_minutes": 80, "active_days": 3, "eat_back_kcal": 0}))
+    assert "Today's target: 2000 kcal" in seen["prompt"] and "already includes" not in seen["prompt"]

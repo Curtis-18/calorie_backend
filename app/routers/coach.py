@@ -196,6 +196,9 @@ async def _build_context(
         log.warning("coach context: region or recipes unavailable", exc_info=True)
 
     moved = await movement_read.week_snapshot(db, user_id, today)
+    if moved["eat_back_kcal"]:
+        # The person chose to add a share of today's movement to the plan; the ring shows it too.
+        allowance = (allowance or target.calorie_target) + moved["eat_back_kcal"]
 
     left_kcal = max(0, (allowance or target.calorie_target) - int(totals["calories"]))
     left_protein = max(0, target.protein_g - round(totals["protein_g"]))

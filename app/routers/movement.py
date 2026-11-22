@@ -5,7 +5,8 @@ import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, select
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,10 +14,10 @@ from app.core.database import get_db
 from app.core.dates import resolve_today
 from app.core.language import get_language
 from app.core.security import get_current_user_id
-from app.models.movement import MovementLog
+from app.models.movement import MovementLog, MovementPrefs
 from app.models.weight_log import WeightLog
 from app.schemas.movement import MovementIn, MovementOut, WeekOut
-from app.services import movement, workouts
+from app.services import movement, movement_read, workouts
 
 log = logging.getLogger("calorie_backend")
 
@@ -144,6 +145,7 @@ async def this_week(
         rows = []
     week = movement.summarise_week(rows, today)
     week["streak"] = movement.moved_weeks(rows, today)
+    week["eat_back_percent"], week["eat_back_kcal"] = await movement_read.today_eat_back(db, user_id, today)
     return week
 
 
@@ -169,3 +171,35 @@ async def choices(user_id: uuid.UUID = Depends(get_current_user_id), lang: str =
         ],
         "intensities": list(movement.INTENSITIES),
     }
+
+
+class PrefsIn(BaseModel):
+    eat_back_percent: int = Field(..., ge=0, le=movement.EAT_BACK_MAX_PERCENT)
+
+
+@router.get("/prefs")
+async def get_prefs(user_id: uuid.UUID = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+    """Whether movement is added to the calorie plan, and how much (0 = off, the default)."""
+    return {"eat_back_percent": await movement_read.eat_back_percent(db, user_id), "max_percent": movement.EAT_BACK_MAX_PERCENT,
+            "daily_cap_kcal": movement.EAT_BACK_DAILY_CAP_KCAL}
+
+
+@router.post("/prefs")
+async def set_prefs(data: PrefsIn, user_id: uuid.UUID = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+    """Choose how much of your logged movement is added to today's plan. POST, like the other choices."""
+    try:
+        async with db.begin_nested():
+            await db.execute(
+                pg_insert(MovementPrefs)
+                .values(user_id=user_id, eat_back_percent=data.eat_back_percent)
+                .on_conflict_do_update(
+                    index_elements=[MovementPrefs.user_id], set_={"eat_back_percent": data.eat_back_percent, "updated_at": func.now()}
+                )
+            )
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+        log.exception("movement prefs not saved")
+        raise HTTPException(503, "Couldn't save that right now")
+    return {"eat_back_percent": data.eat_back_percent, "max_percent": movement.EAT_BACK_MAX_PERCENT,
+            "daily_cap_kcal": movement.EAT_BACK_DAILY_CAP_KCAL}

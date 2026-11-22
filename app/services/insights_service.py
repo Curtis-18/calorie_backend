@@ -31,7 +31,9 @@ MOVEMENT_LINE = (
     "\n\nMovement this week (their own activity, only context): {minutes} min on {days} day(s). "
     "You may mention it in a few warm words. It never changes how much they should eat: never suggest eating more or "
     "less because of it, never give it a calorie value, and never say it burns or earns anything."
+    "{eat_back}"
 )
+EAT_BACK_NOTE = " Today's target already includes {kcal} kcal from movement that they chose to add; use the target as given."
 
 # Added only for a language other than English, so the English prompt is unchanged.
 LANGUAGE_RULE = "\nWrite the narrative in {language}. Keep the JSON key as shown, and keep every number as given."
@@ -105,7 +107,7 @@ async def generate_insights(
     )
 
     prompt = INSIGHTS_PROMPT_TEMPLATE.format(
-        calorie_target=target.calorie_target if target else "not set",
+        calorie_target=(target.calorie_target + int((movement or {}).get("eat_back_kcal") or 0)) if target else "not set",
         protein_target=target.protein_g if target else "not set",
         carbs_target=target.carbs_g if target else "not set",
         fat_target=target.fat_g if target else "not set",
@@ -115,7 +117,11 @@ async def generate_insights(
         today_fat=_n(today_totals["fat_g"]),
         trend_lines=trend_lines,
         movement_line=(
-            MOVEMENT_LINE.format(minutes=int(movement.get("week_minutes", 0)), days=int(movement.get("active_days", 0)))
+            MOVEMENT_LINE.format(
+                minutes=int(movement.get("week_minutes", 0)),
+                days=int(movement.get("active_days", 0)),
+                eat_back=EAT_BACK_NOTE.format(kcal=int(movement["eat_back_kcal"])) if movement.get("eat_back_kcal") else "",
+            )
             if movement and movement.get("week_minutes")
             else ""
         ),

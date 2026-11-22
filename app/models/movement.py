@@ -22,3 +22,13 @@ class MovementLog(Base):
     source = Column(String, nullable=False)  # session | manual
     est_kcal = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MovementPrefs(Base):
+    """How movement relates to the calorie plan. No row = off (nothing added)."""
+
+    __tablename__ = "movement_prefs"
+
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True)
+    eat_back_percent = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

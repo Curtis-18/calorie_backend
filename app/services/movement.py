@@ -84,6 +84,22 @@ def estimate_kcal(activity: str, intensity: str, minutes: int, weight_kg: float 
     return max(0, int(round(kcal / 10.0)) * 10)
 
 
+# ---- adding movement to the calorie plan (opt-in, roadmap D11) ------------------------------
+
+EAT_BACK_MAX_PERCENT = 50
+# Estimates are rough, so however much is logged, a day is never raised by more than this.
+EAT_BACK_DAILY_CAP_KCAL = 500
+
+
+def eat_back_kcal(percent: int, estimated_kcal_today: int) -> int:
+    """The kcal added to today's plan: [percent] of today's rough estimates, to the
+    nearest 5 and never above the daily cap. 0 when off or nothing is logged."""
+    if percent <= 0 or estimated_kcal_today <= 0:
+        return 0
+    share = min(percent, EAT_BACK_MAX_PERCENT) / 100.0 * estimated_kcal_today
+    return min(EAT_BACK_DAILY_CAP_KCAL, int(share / 5.0 + 0.5) * 5)
+
+
 # ---- the week -------------------------------------------------------------------------------------
 
 def week_start(day: date) -> date:
