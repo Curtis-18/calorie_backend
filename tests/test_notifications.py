@@ -758,15 +758,16 @@ class _CronDb(_Db):
         self.rolled_back += 1
 
 
-def _cron(client, monkeypatch, *, hour, inputs=None, prefs_rows=(), statuses=("dry_run",), lang="en", fail=False):
-    """Runs the hourly job for one person with a device, at [hour] UTC on DAY.
+def _cron(client, monkeypatch, *, hour, inputs=None, prefs_rows=(), statuses=("dry_run",), lang="en", fail=False, day=5, extra=()):
+    """Runs the hourly job for one person with a device, at [hour] UTC on 2026-11-[day]
+    (DAY by default). [extra]: database answers between the prefs and the log cleanup.
     Returns (response, notify calls, how often the history was loaded, db)."""
     from app.core.config import settings
     from app.routers import notifications as router
     from app.services import language_pref, progress_read
 
     monkeypatch.setattr(settings, "cron_secret", "s3cret")
-    monkeypatch.setattr(router, "_utcnow", lambda: at(hour))
+    monkeypatch.setattr(router, "_utcnow", lambda: at(hour, day=day))
     calls, loads, answers = [], [], list(statuses)
 
     async def fake_notify(db, uid, kind, *, dedupe_key=None, now=None, **ctx):
@@ -785,7 +786,7 @@ def _cron(client, monkeypatch, *, hour, inputs=None, prefs_rows=(), statuses=("d
     monkeypatch.setattr(router, "notify", fake_notify)
     monkeypatch.setattr(progress_read, "load_inputs", fake_load)
     monkeypatch.setattr(language_pref, "recall", fake_recall)
-    db = _CronDb(_Result(rows=[ME]), _Result(rows=list(prefs_rows)), _Result())  # device owners; prefs; log cleanup
+    db = _CronDb(_Result(rows=[ME]), _Result(rows=list(prefs_rows)), *extra, _Result())  # device owners; prefs; ...; log cleanup
     _job_session(db, monkeypatch)
     r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
     assert r.status_code == 202
@@ -910,3 +911,113 @@ async def test_purging_asks_both_kinds_and_skips_when_storage_is_not_set_up(monk
     asked.clear()
     monkeypatch.setattr(storage_service, "configured", lambda: False)
     assert await router._purge_expired_photos() == 0 and asked == []
+
+
+# --- weekly recap (owner approved the wording 28 Nov 2026) ----------------------
+
+SUNDAY = date(2026, 11, 8)
+
+
+def test_the_recap_is_due_on_sunday_between_17_and_19_only():
+    from app.services.notification_rules import RECAP_MIN_DAYS, RECAP_WINDOW, recap_due
+
+    assert RECAP_WINDOW == (17, 19) and RECAP_MIN_DAYS == 2
+    assert recap_due(at(17, day=8)) and recap_due(at(18, 59, day=8))
+    assert not recap_due(at(16, 59, day=8)) and not recap_due(at(19, day=8))
+    assert not recap_due(at(17, day=7)), "Saturday"
+    assert not recap_due(at(17, day=9)), "Monday"
+
+
+def test_the_recap_week_starts_on_monday_and_the_lines_alternate_by_week():
+    from app.services.notification_rules import recap_week
+
+    assert recap_week(SUNDAY) == (date(2026, 11, 2), "recap:2026-W45", 1)
+    assert recap_week(date(2026, 11, 15)) == (date(2026, 11, 9), "recap:2026-W46", 0)
+    assert recap_week(date(2027, 1, 3))[1] == "recap:2026-W53", "the ISO year, not the calendar year"
+
+
+def test_the_recap_says_exactly_the_approved_words():
+    assert copy_for(Kind.WEEKLY_RECAP, "recap:2026-W46", variant=0, count=3) == (
+        "📅 Your week: 3 days logged", "Have a look at your week in Insights.")
+    assert copy_for(Kind.WEEKLY_RECAP, "recap:2026-W45", variant=1, count=5) == (
+        "🔥 5 days logged this week", "Nice rhythm. Your weekly summary is ready.")
+
+
+def test_the_recap_is_translated_with_its_number_and_no_banned_words_in_any_language():
+    from app.i18n import TABLES, t
+    from app.services.notification_rules import _COPY
+
+    for title, body in _COPY[Kind.WEEKLY_RECAP]:
+        assert not re.search(r"\bearn|reward|treat|cheat|guilt|burn", f"{title} {body}", re.I)
+        for lang in ("es", "fr", "de", "pt", "it"):
+            for text, original in ((TABLES[lang][title], title), (TABLES[lang][body], body)):
+                assert ("{count}" in text) == ("{count}" in original), (lang, original)
+                assert not any(word in text.lower() for word in BANNED), (lang, text)
+            assert "4" in t(lang, title, count=4)
+
+
+@pytest.mark.asyncio
+async def test_a_recap_tap_opens_insights_and_other_kinds_carry_no_link(sent):
+    db = _Db(_Result(rows=["tok-1"]), _Result(None), _Result(0), _Result(ME), _Result())
+    assert await _notify(db, Kind.WEEKLY_RECAP, dedupe_key="recap:2026-W45", count=3, variant=1) == "dry_run"
+    assert sent[0][3] == {"kind": "weekly_recap", "url": "/?shortcut=insights"}
+    db = _Db(_Result(rows=["tok-1"]), _Result(None), _Result(0), _Result(ME), _Result())
+    await _notify(db, Kind.FRIEND_SNAP, dedupe_key="snap:1", name="sam")
+    assert sent[1][3] == {"kind": "friend_snap"}
+
+
+class _Boom:
+    def scalar_one_or_none(self):
+        raise RuntimeError("database hiccup")
+
+
+def test_sunday_evening_sends_the_weeks_recap_with_the_days_logged(client, monkeypatch):
+    r, calls, loads, db = _cron(client, monkeypatch, hour=17, day=8, extra=[_Result(3)], inputs=_inputs([]))
+    assert calls == [(Kind.WEEKLY_RECAP, "recap:2026-W45", {"count": 3, "variant": 1})]
+    assert r.json() == {"checked": 1, "sent": 1, "purged": 0}
+    sql = str(db.executed[2]).lower()
+    assert "count(distinct" in sql and "log_date >=" in sql and "log_date <=" in sql
+    assert loads == [], "badge news waits an hour when a recap went out"
+
+
+def test_one_logged_day_gets_no_recap_but_badge_news_carries_on(client, monkeypatch):
+    r, calls, loads, _ = _cron(client, monkeypatch, hour=17, day=8, extra=[_Result(1)], inputs=_inputs([_log(SUNDAY)]))
+    assert r.json()["checked"] == 1 and Kind.WEEKLY_RECAP not in [k for k, _, _ in calls]
+    assert loads == [SUNDAY] and [k for k, _, _ in calls] == [Kind.MILESTONE]
+    _, calls, _, _ = _cron(client, monkeypatch, hour=17, day=8, extra=[_Result(None)], inputs=_inputs([]))
+    assert calls == [], "no logs at all: nothing"
+
+
+def test_no_recap_on_other_days_or_after_seven(client, monkeypatch):
+    r, calls, _, db = _cron(client, monkeypatch, hour=17, day=7, inputs=_inputs([]))
+    assert r.json()["checked"] == 1 and calls == [] and len(db.executed) == 3, "Saturday: the week is not even counted"
+    # 19:00: the own-logging check and the friend streaks still run; the recap does not.
+    r, calls, _, db = _cron(client, monkeypatch, hour=19, day=8, extra=[_Result(rows=[]), _Result(rows=[])], inputs=_inputs([]))
+    assert r.json()["checked"] == 1 and calls == []
+    assert not any("count(distinct" in str(s).lower() for s in db.executed)
+
+
+def test_the_recap_follows_the_badges_and_levels_switch_pause_and_quiet_hours(client, monkeypatch):
+    for prefs in (_prefs(milestones=False), _prefs(quiet_start=16, quiet_end=18),
+                  _prefs(paused_until=at(23, day=8))):
+        r, calls, _, db = _cron(client, monkeypatch, hour=17, day=8, prefs_rows=[prefs], inputs=_inputs([]))
+        assert r.json()["checked"] == 1 and calls == [], prefs
+        assert not any("count(distinct" in str(s).lower() for s in db.executed), "not even counted"
+
+
+def test_a_recap_already_sent_this_week_lets_badge_news_through(client, monkeypatch):
+    # 18:00 runs, in order: own logging (its logs), the recap count, the friend streaks.
+    r, calls, loads, _ = _cron(
+        client, monkeypatch, hour=18, day=8, extra=[_Result(rows=[]), _Result(4), _Result(rows=[])],
+        inputs=_inputs([_log(SUNDAY)]), statuses=("duplicate", "dry_run"),
+    )
+    assert r.json()["checked"] == 1
+    assert [(k, key) for k, key, _ in calls] == [(Kind.WEEKLY_RECAP, "recap:2026-W45"), (Kind.MILESTONE, "badge:first_bite")]
+    assert loads == [SUNDAY]
+
+
+def test_a_failing_count_is_rolled_back_and_the_rest_still_runs(client, monkeypatch):
+    r, calls, loads, db = _cron(client, monkeypatch, hour=17, day=8, extra=[_Boom()], inputs=_inputs([_log(SUNDAY)]))
+    assert db.rolled_back == 1 and db.committed
+    assert [k for k, _, _ in calls] == [Kind.MILESTONE] and loads == [SUNDAY]
+

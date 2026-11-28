@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from app.services.notification_rules import (
     MILESTONE_WINDOW,
     MY_STREAK_WINDOW,
     ANNOUNCEMENTS,
+    RECAP_MIN_DAYS,
     Kind,
     decide,
     in_reminder_window,
@@ -35,6 +36,8 @@ from app.services.notification_rules import (
     milestone_events,
     own_reminders,
     pick_streak_to_save,
+    recap_due,
+    recap_week,
 )
 from app.services.progress_service import LogRow, compute_progress
 from app.services import announcements, language_pref, progress_read, push_sender
@@ -233,6 +236,26 @@ async def _send_milestone(db: AsyncSession, uid: uuid.UUID, prefs, local: dateti
     return None
 
 
+async def _send_recap(db: AsyncSession, uid: uuid.UUID, prefs, local: datetime, now: datetime) -> str | None:
+    """Sunday evening: how many days the person logged this week (Monday to
+    today, their own days), only when it is 2 or more. None when nothing was
+    tried. The week's dedupe key keeps it to one a week."""
+    if not decide(Kind.WEEKLY_RECAP, prefs, now, 0).allowed:
+        return None  # switched off, paused or quiet hours: don't even count
+    today = local.date()
+    monday, key, line = recap_week(today)
+    days = (
+        await db.execute(
+            select(func.count(distinct(FoodLog.log_date))).where(
+                FoodLog.user_id == uid, FoodLog.log_date >= monday, FoodLog.log_date <= today
+            )
+        )
+    ).scalar_one_or_none() or 0
+    if days < RECAP_MIN_DAYS:
+        return None
+    return await notify(db, uid, Kind.WEEKLY_RECAP, dedupe_key=key, now=now, count=int(days), variant=line)
+
+
 # One run at a time in this process (a slow run and the next call must not
 # overlap; the dedupe keys would still stop double sends, but not double work).
 _job_lock = asyncio.Lock()
@@ -333,6 +356,7 @@ async def _send_reminders(db: AsyncSession, now: datetime) -> dict:
     - evening: "your logging streak ends tonight" (only with a running streak)
     - evening: "your streak with a friend ends tonight" (a bite is owed)
     - daytime: a freeze covered yesterday, a new badge or a new level (one a run)
+    - Sunday 17:00-19:00: how many days you logged this week (2 or more only)
     """
     user_ids = (await db.execute(select(DeviceToken.user_id).distinct())).scalars().all()
     pref_rows = {
@@ -355,7 +379,8 @@ async def _send_reminders(db: AsyncSession, now: datetime) -> dict:
         wants_pair = in_reminder_window(local.hour)
         wants_own = in_window(local.hour, LOG_REMINDER_WINDOW) or in_window(local.hour, MY_STREAK_WINDOW)
         wants_milestone = in_window(local.hour, MILESTONE_WINDOW)
-        if not (wants_pair or wants_own or wants_milestone):
+        wants_recap = recap_due(local)
+        if not (wants_pair or wants_own or wants_milestone or wants_recap):
             continue
         results["checked"] += 1
 
@@ -371,8 +396,21 @@ async def _send_reminders(db: AsyncSession, now: datetime) -> dict:
                 # this, everyone after them failed as well.
                 await db.rollback()
 
+        # The week's recap before badges: it has only two hours on one day, while
+        # badge news has all day; when a recap went out, badge news waits an hour.
+        recap_went = False
+        if wants_recap:
+            try:
+                status = await _send_recap(db, uid, prefs, local, now)
+                if status is not None:
+                    counted(status)
+                    recap_went = status in ("sent", "dry_run")
+            except Exception:  # noqa: BLE001 - one person's failure must not stop the rest
+                log.exception("weekly recap failed for a user")
+                await db.rollback()
+
         # Before the friend streaks: that block ends early with `continue`.
-        if wants_milestone:
+        if wants_milestone and not recap_went:
             try:
                 status = await _send_milestone(db, uid, prefs, local, now)
                 if status is not None:

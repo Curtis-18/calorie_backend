@@ -36,6 +36,7 @@ class Kind(str, Enum):
     FRIEND_REQUEST = "friend_request"      # someone asked to be your friend
     FRIEND_ACCEPTED = "friend_accepted"    # someone said yes to your request
     MESSAGE = "message"                    # a friend wrote to you (never shows the text)
+    WEEKLY_RECAP = "weekly_recap"          # Sunday evening: how many days you logged this week
 
 
 # Which preference switch controls which kind.
@@ -57,6 +58,9 @@ _SWITCH = {
     Kind.FRIEND_REQUEST: "friend_snaps",
     Kind.FRIEND_ACCEPTED: "friend_snaps",
     Kind.MESSAGE: "friend_snaps",
+    # Good news about your own logging, like badges and levels ("Badges and
+    # levels" in the app): no new column, so no migration.
+    Kind.WEEKLY_RECAP: "milestones",
 }
 
 
@@ -175,6 +179,19 @@ _COPY: dict[Kind, list[tuple[str, str]]] = {
     Kind.MEAL_NUDGE: [
         ("🍽️ Time for a snack bite?", "A photo takes five seconds."),
     ],
+    # Wording approved by the owner on 28 Nov 2026 (both lines, alternating by
+    # week through `variant`). Only sent for 2 or more days, so {count} is never 0 or 1.
+    Kind.WEEKLY_RECAP: [
+        ("📅 Your week: {count} days logged", "Have a look at your week in Insights."),
+        ("🔥 {count} days logged this week", "Nice rhythm. Your weekly summary is ready."),
+    ],
+}
+
+# Where a tap on the notification should land, for kinds that have a place.
+# Sent in the push's data as "url"; the app's push worker (web/push/sw.js)
+# opens it when the app isn't already open. A path on the app's own address.
+LINKS: dict[Kind, str] = {
+    Kind.WEEKLY_RECAP: "/?shortcut=insights",
 }
 
 
@@ -290,3 +307,24 @@ def milestone_events(now_progress: dict, before_progress: dict, today: date) -> 
     if level_now > before_progress["level"]["level"]:
         events.append((Kind.MILESTONE, f"level:{level_now}", {"count": level_now, "variant": LEVEL_LINE}))
     return events
+
+
+# --- weekly recap ------------------------------------------------------------
+
+# Sunday, between these local hours (two hourly runs; the week's dedupe key keeps it to one).
+RECAP_WINDOW = (17, 19)
+
+# Never tell someone they logged 0 or 1 days: a recap is only good news.
+RECAP_MIN_DAYS = 2
+
+
+def recap_due(local: datetime) -> bool:
+    return local.weekday() == 6 and in_window(local.hour, RECAP_WINDOW)
+
+
+def recap_week(day: date) -> tuple[date, str, int]:
+    """For a recap sent on [day]: the Monday its week starts on, the week's
+    dedupe key ("recap:2026-W45") and which line of the copy to use (weeks
+    alternate between the two approved lines)."""
+    iso = day.isocalendar()
+    return day - timedelta(days=day.weekday()), f"recap:{iso.year}-W{iso.week:02d}", iso.week % 2

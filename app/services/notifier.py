@@ -19,7 +19,7 @@ from app.core.database import async_session_maker
 from app.models.notification import DeviceToken, NotificationLog, NotificationPrefs
 from app.models.user import Profile
 from app.services import language_pref, push_sender
-from app.services.notification_rules import Kind, Prefs, copy_for, decide, local_day_bounds_utc
+from app.services.notification_rules import LINKS, Kind, Prefs, copy_for, decide, local_day_bounds_utc
 
 log = logging.getLogger("calorie_backend")
 
@@ -127,7 +127,10 @@ async def notify(
         return "duplicate"
 
     try:
-        status = await push_sender.send(list(tokens), title, body, {"kind": kind.value})
+        data = {"kind": kind.value}
+        if kind in LINKS:
+            data["url"] = LINKS[kind]  # where a tap lands (older push workers open it too)
+        status = await push_sender.send(list(tokens), title, body, data)
     except Exception:  # noqa: BLE001 - delivery problems are logged, never raised
         log.exception("push delivery failed")
         status = "failed"
