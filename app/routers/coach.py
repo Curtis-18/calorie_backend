@@ -6,11 +6,13 @@ from their own data; the app never sends it. Adults only: the plan (targets)
 already refuses under 18, and the coach needs a plan to know the calorie floor.
 """
 
+import json
 import logging
 import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -229,24 +231,11 @@ async def _history(db: AsyncSession, user_id: uuid.UUID, before_id: uuid.UUID) -
     return [(r, b) for r, b in reversed(rows)]
 
 
-@router.post("/messages", response_model=CoachMessageOut)
-async def send_message(
-    data: CoachMessageIn,
-    background: BackgroundTasks,
-    date: date_type | None = None,
-    user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-    lang: str = Depends(get_language),
-):
-    """Store the person's turn, answer it, store and return the answer.
-
-    Idempotent on `id`: sending the same turn again returns the stored answer,
-    or answers it now if the first attempt never got that far.
-    """
-    require_feature(user_id, Feature.COACH_CHAT)
-    today = resolve_today(date)
-    target = await _target(db, user_id)
-
+async def _store_turn(db: AsyncSession, user_id: uuid.UUID, data: CoachMessageIn) -> CoachMessage | None:
+    """Store the person's turn, or find it when the same id comes again.
+    Returns the answer it already got, if any (then nothing new is stored or
+    counted). Raises 409 for someone else's id, 429 for too many turns, 503
+    when the table can't be written (the migration not run)."""
     try:
         async with db.begin_nested():
             existing = (await db.execute(select(CoachMessage).where(CoachMessage.id == data.id))).scalar_one_or_none()
@@ -278,9 +267,58 @@ async def send_message(
         log.warning("coach turn not stored: %r", exc)
         await db.rollback()
         raise HTTPException(status_code=503, detail=UNAVAILABLE)
+    if answered is None:
+        await db.commit()
+    return answered
+
+
+async def _store_reply(
+    db: AsyncSession, user_id: uuid.UUID, reply: str, tokens_in: int | None, tokens_out: int | None
+) -> CoachMessage:
+    stored = CoachMessage(
+        id=uuid.uuid4(), user_id=user_id, role="coach", body=reply, tokens_in=tokens_in, tokens_out=tokens_out
+    )
+    try:
+        async with db.begin_nested():
+            db.add(stored)
+            await db.flush()
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("coach reply not stored: %r", exc)
+        await db.rollback()
+        raise HTTPException(status_code=503, detail=UNAVAILABLE)
+    await db.refresh(stored)
+    return stored
+
+
+def _answer(stored: CoachMessage, recipes: list[dict], lang: str, from_model: bool) -> CoachMessageOut:
+    """The stored answer with its buttons: only for an answer the model wrote,
+    only for recipes it named, and one routine at most, by its exact name."""
+    named = meal_swaps.named_in(stored.body, recipes) if from_model else []
+    routine = meal_swaps.named_in(stored.body, workouts.names(lang), limit=1) if from_model else []
+    return _out(stored, named, [workouts.render(workouts.get(r["id"]), lang) for r in routine])
+
+
+@router.post("/messages", response_model=CoachMessageOut)
+async def send_message(
+    data: CoachMessageIn,
+    background: BackgroundTasks,
+    date: date_type | None = None,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+    lang: str = Depends(get_language),
+):
+    """Store the person's turn, answer it, store and return the answer.
+
+    Idempotent on `id`: sending the same turn again returns the stored answer,
+    or answers it now if the first attempt never got that far.
+    """
+    require_feature(user_id, Feature.COACH_CHAT)
+    today = resolve_today(date)
+    target = await _target(db, user_id)
+    answered = await _store_turn(db, user_id, data)
     if answered is not None:
         return _out(answered)
-    await db.commit()
 
     floor = MIN_CALORIES[target.sex]
     from_model = False
@@ -299,27 +337,91 @@ async def send_message(
         except coach_service.CoachUnavailable:
             raise HTTPException(status_code=503, detail=UNAVAILABLE)
 
-    stored = CoachMessage(
-        id=uuid.uuid4(), user_id=user_id, role="coach", body=reply, tokens_in=tokens_in, tokens_out=tokens_out
-    )
-    try:
-        async with db.begin_nested():
-            db.add(stored)
-            await db.flush()
-        await db.commit()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("coach reply not stored: %r", exc)
-        await db.rollback()
-        raise HTTPException(status_code=503, detail=UNAVAILABLE)
-    await db.refresh(stored)
+    stored = await _store_reply(db, user_id, reply, tokens_in, tokens_out)
     if from_model:
         background.add_task(record_usage, user_id, Feature.COACH_CHAT, today)
     await _forget_old(db, user_id)
-    # Buttons only for an answer the model wrote, and only for recipes it named.
-    named = meal_swaps.named_in(reply, recipes) if from_model else []
-    # One routine at most, and only one whose exact name the reply uses.
-    routine = meal_swaps.named_in(reply, workouts.names(lang), limit=1) if from_model else []
-    return _out(stored, named, [workouts.render(workouts.get(r["id"]), lang) for r in routine])
+    return _answer(stored, recipes, lang, from_model)
+
+
+def _event(payload: dict) -> bytes:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+
+
+def _events_response(events, background: BackgroundTasks) -> StreamingResponse:
+    return StreamingResponse(
+        events,
+        media_type="text/event-stream",
+        # no-transform and X-Accel-Buffering: ask the proxies on the way
+        # (Vercel's /api forwarding, Render) not to hold the answer back.
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+        background=background,
+    )
+
+
+async def _one(message: CoachMessageOut):
+    yield _event({"type": "done", "message": message.model_dump(mode="json")})
+
+
+@router.post("/messages/stream")
+async def stream_message(
+    data: CoachMessageIn,
+    background: BackgroundTasks,
+    date: date_type | None = None,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+    lang: str = Depends(get_language),
+):
+    """POST /messages, with the answer arriving while it is written (added 28 Nov 2026).
+
+    Server-sent events, one JSON object per `data:` line: `{"type": "delta",
+    "text"}` (checked text to show next), `{"type": "reset"}` (drop what was
+    shown; a new answer follows), `{"type": "done", "message"}` (the stored
+    answer exactly as POST /messages returns it; the app keeps this one), or
+    `{"type": "error"}` (the app then asks POST /messages with the same id).
+    Anything that goes wrong before the answer starts (no plan, a used id, too
+    many turns, the table missing) is an ordinary error status, as in POST.
+    Idempotent on `id` like POST: an answered turn gets its stored answer at once.
+    """
+    require_feature(user_id, Feature.COACH_CHAT)
+    today = resolve_today(date)
+    target = await _target(db, user_id)
+    answered = await _store_turn(db, user_id, data)
+    if answered is not None:
+        return _events_response(_one(_out(answered)), background)
+
+    if coach_prompt.needs_care(data.text):
+        log.info("coach_care_reply")
+        stored = await _store_reply(db, user_id, coach_service.care_reply(lang), None, None)
+        await _forget_old(db, user_id)
+        return _events_response(_one(_out(stored)), background)
+
+    floor = MIN_CALORIES[target.sex]
+    context, recipes = await _build_context(db, user_id, target, today, lang)
+    history = await _history(db, user_id, data.id)
+    await db.commit()  # end the read: no database connection is held while Gemini writes
+
+    async def events():
+        try:
+            async for kind, value in coach_service.stream_reply(
+                context=context, history=history, text=data.text, lang=lang, floor=floor
+            ):
+                if kind == "delta":
+                    yield _event({"type": "delta", "text": value})
+                elif kind == "reset":
+                    yield _event({"type": "reset"})
+                else:
+                    reply, tokens_in, tokens_out, from_model = value
+                    stored = await _store_reply(db, user_id, reply, tokens_in, tokens_out)
+                    await _forget_old(db, user_id)
+                    if from_model:
+                        background.add_task(record_usage, user_id, Feature.COACH_CHAT, today)
+                    yield _event({"type": "done", "message": _answer(stored, recipes, lang, from_model).model_dump(mode="json")})
+        except (coach_service.CoachUnavailable, HTTPException):
+            # Nothing was stored for this turn, so POST /messages with the same id answers it.
+            yield _event({"type": "error"})
+
+    return _events_response(events(), background)
 
 
 async def _forget_old(db: AsyncSession, user_id: uuid.UUID) -> None:

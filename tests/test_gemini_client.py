@@ -219,3 +219,160 @@ async def test_an_explicit_kind_names_the_call_in_the_log(monkeypatch, caplog, t
     with caplog.at_level(logging.INFO, logger="calorie_backend"):
         await gemini_client.generate_content({"contents": []}, kind="coach")
     assert any("kind=coach" in r.getMessage() for r in caplog.records)
+
+
+# ---- streaming (the coach, since 28 Nov 2026) --------------------------------------------------------
+
+class _StreamResponse:
+    def __init__(self, status_code, lines=(), text="", drop_after=None):
+        self.status_code = status_code
+        self._lines = list(lines)
+        self.text = text
+        self.drop_after = drop_after
+        self.request = httpx.Request("POST", "https://gemini.test")
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def aread(self):
+        return self.text.encode()
+
+    async def aiter_lines(self):
+        for n, line in enumerate(self._lines):
+            if self.drop_after is not None and n == self.drop_after:
+                raise httpx.ReadError("connection dropped")
+            yield line
+
+
+class _StreamClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return self._responses.pop(0)
+
+
+def _streams(monkeypatch, responses):
+    client = _StreamClient(responses)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: client)
+    return client
+
+
+def _sse(text, finish=None, usage=None):
+    import json as _json
+
+    chunk = {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+    if finish:
+        chunk["candidates"][0]["finishReason"] = finish
+    if usage:
+        chunk["usageMetadata"] = usage
+    return "data: " + _json.dumps(chunk)
+
+
+async def _collect(payload=None, **kw):
+    return [c async for c in gemini_client.stream_content(payload or {"contents": []}, kind="coach", **kw)]
+
+
+async def test_a_stream_passes_each_piece_on_in_order_and_skips_what_is_not_a_piece(monkeypatch, caplog, thinking_state):
+    import logging
+
+    monkeypatch.setattr(gemini_client.settings, "gemini_model", "gemini-3.6-flash")
+    client = _streams(monkeypatch, [_StreamResponse(200, [
+        _sse("Nice "), "", ": a comment", "event: message", "data: not json", "data: [1, 2]",
+        _sse("work today."), _sse("", finish="STOP", usage={"promptTokenCount": 900, "candidatesTokenCount": 40}),
+        "data: [DONE]",
+    ])])
+    with caplog.at_level(logging.INFO, logger="calorie_backend"):
+        chunks = await _collect()
+    texts = [c["candidates"][0]["content"]["parts"][0]["text"] for c in chunks]
+    assert texts == ["Nice ", "work today.", ""]
+    method, url, kwargs = client.calls[0]
+    assert method == "POST" and url.endswith("/models/gemini-3.6-flash:streamGenerateContent?alt=sse")
+    assert "key=" not in url and kwargs["headers"]["x-goog-api-key"] is not None
+    assert kwargs["json"]["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("gemini_call"))
+    assert "kind=coach" in line and "prompt_tokens=900" in line and "output_tokens=40" in line
+
+
+async def test_a_stream_counts_against_the_shared_daily_budget(monkeypatch, thinking_state):
+    from app.services import gemini_budget
+
+    seen = []
+    monkeypatch.setattr(gemini_budget, "record_call", lambda model=None: seen.append(model))
+    _streams(monkeypatch, [_StreamResponse(200, [_sse("Hi.")])])
+    await _collect()
+    assert len(seen) == 1
+
+
+async def test_a_spent_budget_refuses_a_stream_before_anything_is_sent(monkeypatch, thinking_state):
+    from app.services import gemini_budget
+
+    def refuse(kind, now=None, model=None):
+        raise RuntimeError("budget spent")
+
+    monkeypatch.setattr(gemini_budget, "check", refuse)
+    client = _streams(monkeypatch, [])
+    with pytest.raises(RuntimeError):
+        await _collect()
+    assert client.calls == []
+
+
+async def test_a_busy_model_is_asked_again_before_the_first_piece(monkeypatch, no_sleep, thinking_state):
+    client = _streams(monkeypatch, [_StreamResponse(503, text="high demand"), _StreamResponse(200, [_sse("Hi.")])])
+    assert len(await _collect()) == 1 and len(client.calls) == 2
+
+
+async def test_a_spent_quota_on_a_stream_is_not_asked_again(monkeypatch, no_sleep, thinking_state):
+    from app.services import gemini_budget
+
+    noted = []
+    monkeypatch.setattr(gemini_budget, "note_rejected", lambda body, now=None, model=None: noted.append(body))
+    client = _streams(monkeypatch, [_StreamResponse(429, text="quota exceeded")])
+    with pytest.raises(httpx.HTTPStatusError):
+        await _collect()
+    assert len(client.calls) == 1 and noted == ["quota exceeded"]
+
+
+async def test_a_stream_whose_thinking_setting_is_refused_is_sent_again_without_it(monkeypatch, no_sleep, thinking_state):
+    monkeypatch.setattr(gemini_client.settings, "gemini_model", "gemini-3.6-flash")
+    client = _streams(monkeypatch, [
+        _StreamResponse(400, text='Unknown name "thinkingLevel": thinking is not supported'),
+        _StreamResponse(200, [_sse("Hi.")]),
+    ])
+    assert len(await _collect()) == 1
+    assert "thinkingConfig" in client.calls[0][2]["json"]["generationConfig"]
+    assert "generationConfig" not in client.calls[1][2]["json"]
+
+
+async def test_a_connection_that_drops_after_a_piece_is_not_asked_again(monkeypatch, no_sleep, thinking_state):
+    """Asking again would show the same words twice; the caller decides instead."""
+    client = _streams(monkeypatch, [_StreamResponse(200, [_sse("Hi. "), _sse("More.")], drop_after=1)])
+    got = []
+    with pytest.raises(httpx.ReadError):
+        async for chunk in gemini_client.stream_content({"contents": []}, kind="coach"):
+            got.append(chunk)
+    assert len(got) == 1 and len(client.calls) == 1
+
+
+async def test_a_connection_that_fails_before_any_piece_is_tried_again(monkeypatch, no_sleep, thinking_state):
+    client = _streams(monkeypatch, [_StreamResponse(200, [_sse("x")], drop_after=0), _StreamResponse(200, [_sse("Hi.")])])
+    assert len(await _collect()) == 1 and len(client.calls) == 2
+
+
+async def test_when_the_main_models_quota_is_spent_the_stream_uses_the_fallback_model(monkeypatch, no_sleep, thinking_state):
+    monkeypatch.setattr(gemini_client.settings, "gemini_model", "gemini-3.6-flash")
+    monkeypatch.setattr(gemini_client.settings, "gemini_fallback_model", "gemini-2.5-flash")
+    client = _streams(monkeypatch, [_StreamResponse(429, text="RESOURCE_EXHAUSTED quota"), _StreamResponse(200, [_sse("Hi.")])])
+    assert len(await _collect()) == 1
+    assert "gemini-2.5-flash:streamGenerateContent" in client.calls[1][1]

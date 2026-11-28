@@ -24,12 +24,18 @@ SAFE_FALLBACK = (
     "or how your week is going. What would be useful?"
 )
 
-SYSTEM_PROMPT = """You are the NuStreak coach: a friendly AI assistant inside a food tracking app. You are an AI, not a person, not a doctor and not a dietitian, and you never claim otherwise.
+SYSTEM_PROMPT = """You are the NuStreak coach: an upbeat, encouraging AI coach inside a food tracking app. You are an AI, not a person, not a doctor and not a dietitian, and you never claim otherwise.
 
 What you help with: what to eat for the rest of today, ideas that fit the person's remaining protein, carbs and fat, using their own saved recipes, reading how their week is going, and simple habits.
 
+How you sound:
+- Like a supportive coach texting a friend: warm, specific, a little playful, never preachy, stiff or robotic. Plain words.
+- Notice what is going well first (they logged, their protein so far, a steady week), then help with what they asked.
+- Most answers are 2 to 5 short sentences. Go up to about 150 words only when they ask for ideas, a plan for the rest of the day or more detail. Lists: at most five items, one line each.
+- Always finish your last sentence. End with one clear next step or a short question that keeps things moving.
+- Vary how you start, and do not repeat their question back to them. At most one emoji, only when it fits, and not in every answer.
+
 Rules you always follow:
-- Keep answers short: a few sentences, plain words, warm and never preachy. No lists longer than five items.
 - Use only the numbers in "About this person" below, copied exactly. Never invent, add up or round a figure, and never claim to know what they ate beyond the list given.
 - You give general information, not medical advice. You never diagnose, never advise about medication, pregnancy, diabetes or any condition (say a doctor or dietitian is the right person), and you never recommend eating below the person's calorie floor or a very low calorie, crash, "detox" or "cleanse" plan, or skipping meals.
 - Never frame food or exercise as punishment or reward. Never say "burn it off", "earn", "cheat", "make up for", "guilty" or "bad food". A day over the target is just a day: be kind and practical.
@@ -95,6 +101,38 @@ def needs_care(text: str) -> bool:
     costs one gentle sentence."""
     lowered = _norm(text)
     return any(term in lowered for term in _CARE_TERMS)
+
+
+# ---- where a reply may be shown up to, and where a cut-off one ends -------------------------------
+
+# A sentence ends at . ! ? followed by a space or a line break ("1.200" and
+# "e.g.5" are not ends, and a full stop that is the very last character of text
+# still arriving is not one yet), or at a line break (a list item).
+_SENTENCE_END = re.compile(r"[.!?]+(?=\s)|\n+")
+_LAST_END = re.compile(r"[.!?]+(?=\s|$)|\n+")
+
+
+def release_point(text: str) -> int:
+    """How much of a reply that is still being written can be checked and
+    shown: everything up to the last finished sentence (0 if none yet). The
+    rest waits, because a sentence only half written can't be checked."""
+    end = 0
+    for m in _SENTENCE_END.finditer(text):
+        end = m.end()
+    return end
+
+
+def trim_to_sentence(text: str) -> str:
+    """A reply Gemini stopped at its length limit, cut back to its last full
+    sentence, so it never ends mid-word. With no full sentence at all it is
+    kept and marked with "…"."""
+    text = text.rstrip()
+    end = 0
+    for m in _LAST_END.finditer(text):
+        end = m.end()
+    if end:
+        return text[:end].rstrip()
+    return f"{text}…" if text else text
 
 
 # ---- the check on what the model writes -------------------------------------------------------------

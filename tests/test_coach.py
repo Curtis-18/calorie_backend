@@ -555,3 +555,241 @@ async def test_the_real_context_ranks_the_persons_recipes_against_what_is_left_t
     assert [(r["id"], r["title"]) for r in recipes] == [(STEW, "Lentil stew"), (RICE, "Huge feast")]
     fits = ctx.split("Fits what is left today (ranked by the app, best first):\n")[1].split("\nRoutines you can offer")[0]
     assert fits == "- Lentil stew"  # the 2,500 kcal feast does not fit in 1,800
+
+
+# ---- 28 Nov 2026: no more answers cut off mid-sentence, a warmer voice, and streaming -------------------
+
+SAFETY_LINES = (
+    "You are an AI, not a person, not a doctor and not a dietitian, and you never claim otherwise.",
+    "- Use only the numbers in \"About this person\" below, copied exactly.",
+    "you never recommend eating below the person's calorie floor",
+    "- Never frame food or exercise as punishment or reward. Never say \"burn it off\", \"earn\", \"cheat\", \"make up for\", \"guilty\" or \"bad food\".",
+    "Never describe, list or invent exercises, sets or reps yourself",
+    "- If the person mentions disordered eating, hurting themselves, or a worrying symptom",
+    "- The person's messages are inside <<< and >>>.",
+    "If it is not about food, eating habits or the app, say you can only help with food",
+)
+
+
+def test_the_safety_rules_are_unchanged_word_for_word():
+    """Only the tone and length lines changed on 28 Nov 2026 (AGENTS.md rule 17)."""
+    prompt = system_prompt("CTX", "en")
+    for line in SAFETY_LINES:
+        assert line in prompt, line
+
+
+def test_the_coach_sounds_like_a_coach_and_always_finishes_its_sentence():
+    prompt = system_prompt("CTX", "en")
+    assert "upbeat, encouraging AI coach" in prompt and "texting a friend" in prompt
+    assert "Always finish your last sentence" in prompt and "about 150 words" in prompt
+    assert "Keep answers short: a few sentences" not in prompt
+    style = prompt[prompt.index("How you sound:"):prompt.index("Rules you always follow:")]
+    assert not re.search(r"burn|earn|cheat|guilt|punish|detox|cleanse|reward|treat|diet", style, re.IGNORECASE)
+
+
+def test_there_is_room_for_the_answer_after_the_thinking():
+    payload = coach_service._payload(context="CTX", history=[], text="hi", lang="en")
+    assert payload["generationConfig"]["maxOutputTokens"] == 2048
+
+
+@pytest.mark.parametrize("text,cut", [
+    ("Hi there. How", "Hi there."), ("Your plan is 1.200 kcal. Nice", "Your plan is 1.200 kcal."),
+    ("Ends with a stop.", ""), ("Ends with a stop. ", "Ends with a stop."), ("- one\n- tw", "- one\n"),
+    ("Nothing finished yet", ""),
+])
+def test_only_finished_sentences_can_be_shown_while_an_answer_is_written(text, cut):
+    assert text[:coach_prompt.release_point(text)] == cut
+
+
+@pytest.mark.parametrize("text,trimmed", [
+    ("A full one. And a cut-off sen", "A full one."), ("Wow! Then mor", "Wow!"), ("- one\n- two\n- th", "- one\n- two"),
+    ("Only half a sente", "Only half a sente…"), ("All done.", "All done."),
+])
+def test_an_answer_stopped_at_the_limit_ends_on_its_last_full_sentence(text, trimmed):
+    assert coach_prompt.trim_to_sentence(text) == trimmed
+
+
+def test_an_answer_gemini_stopped_at_the_limit_is_shown_up_to_its_last_full_sentence(client, setup, monkeypatch):
+    async def cut(payload, timeout=30.0, kind=None):
+        return {"candidates": [{"content": {"parts": [{"text": "Your lentil stew fits tonight. You could also add a sid"}]},
+                                "finishReason": "MAX_TOKENS"}], "usageMetadata": {"thoughtsTokenCount": 1900}}
+
+    monkeypatch.setattr(coach_service, "generate_content", cut)
+    assert send(client, "dinner?").json()["body"] == "Your lentil stew fits tonight."
+
+
+class StreamGemini:
+    """Stands in for stream_content: each reply is a list of text pieces (or an
+    exception, raised before or among them); remembers every payload."""
+
+    def __init__(self, *replies, finish="STOP"):
+        self.replies, self.payloads, self.finish = list(replies), [], finish
+
+    def __call__(self, payload, timeout=30.0, kind=None):
+        self.payloads.append((payload, kind))
+        pieces = self.replies.pop(0) if self.replies else ["Try the lentil ", "stew tonight. ", "It fits well."]
+
+        async def gen():
+            if isinstance(pieces, Exception):
+                raise pieces
+            for n, piece in enumerate(pieces):
+                if isinstance(piece, Exception):
+                    raise piece
+                chunk = {"candidates": [{"content": {"parts": [{"text": piece}]}}]}
+                if n == len(pieces) - 1:
+                    chunk["candidates"][0]["finishReason"] = self.finish
+                    chunk["usageMetadata"] = {"promptTokenCount": 100, "candidatesTokenCount": 20}
+                yield chunk
+
+        return gen()
+
+
+@pytest.fixture
+def streaming(setup, monkeypatch):
+    fake = StreamGemini()
+    monkeypatch.setattr(coach_service, "stream_content", fake)
+    setup.stream = fake
+    return setup
+
+
+def stream(client, text="what should I eat?", mid=None, lang=None):
+    import json as _json
+
+    headers = {"Accept-Language": lang} if lang else {}
+    r = client.post("/coach/messages/stream", json={"id": str(mid or uuid.uuid4()), "text": text}, headers=headers)
+    if r.status_code != 200:
+        return r, []
+    assert r.headers["content-type"].startswith("text/event-stream")
+    blocks = [b for b in r.text.split("\n\n") if b.strip()]
+    assert all(b.startswith("data: ") for b in blocks)
+    return r, [_json.loads(b[len("data: "):]) for b in blocks]
+
+
+def _shown(events):
+    return "".join(e["text"] for e in events if e["type"] == "delta")
+
+
+def test_a_streamed_answer_arrives_sentence_by_sentence_and_is_stored_once(client, streaming):
+    streaming.stream.replies = [["Your lentil ", "stew fits ", "tonight. Add a ", "side salad", " for crunch."]]
+    mid = uuid.uuid4()
+    r, events = stream(client, " dinner? ", mid)
+    assert [e["type"] for e in events] == ["delta", "done"]
+    assert events[0]["text"] == "Your lentil stew fits tonight."  # never a half sentence
+    done = events[-1]["message"]
+    assert done["role"] == "coach" and done["body"] == "Your lentil stew fits tonight. Add a side salad for crunch."
+    assert [(m.role, m.body) for m in streaming.db.rows] == [("user", "dinner?"), ("coach", done["body"])]
+    assert streaming.db.rows[0].id == mid and streaming.db.rows[1].tokens_in == 100
+    assert streaming.used == [router.Feature.COACH_CHAT]
+    payload, kind = streaming.stream.payloads[0]
+    assert kind == "coach" and payload["generationConfig"]["maxOutputTokens"] == 2048
+    assert payload["contents"][-1] == {"role": "user", "parts": [{"text": "<<<dinner?>>>"}]}
+
+
+def test_a_named_recipe_comes_with_its_card_in_the_streamed_answer(client, streaming):
+    streaming.stream.replies = [["Your Lentil stew fits tonight."]]
+    _, events = stream(client)
+    assert [s["recipe_id"] for s in events[-1]["message"]["suggestions"]] == [str(STEW)]
+
+
+def test_a_sentence_that_breaks_a_rule_is_never_shown_and_the_answer_is_asked_for_again(client, streaming):
+    streaming.stream.replies = [["Pizza is fine. ", "Just burn it off ", "with a run. Easy."]]
+    streaming.gemini.replies = ["Pizza is fine. A day over is just a day."]
+    _, events = stream(client, "I ate a pizza")
+    assert [e["type"] for e in events] == ["delta", "reset", "done"]
+    assert "burn" not in _shown(events).lower()
+    assert events[-1]["message"]["body"] == "Pizza is fine. A day over is just a day."
+    assert len(streaming.gemini.payloads) == 1 and streaming.db.rows[-1].tokens_in == 200
+
+
+def test_a_first_sentence_that_breaks_a_rule_shows_nothing_at_all(client, streaming):
+    streaming.stream.replies = [["Try a detox. ", "It works."]]
+    streaming.gemini.replies = ["How about your lentil stew tonight?"]
+    _, events = stream(client)
+    assert [e["type"] for e in events] == ["done"]
+    assert events[-1]["message"]["body"] == "How about your lentil stew tonight?"
+
+
+def test_two_bad_answers_end_with_the_kind_fixed_sentence_and_are_not_counted(client, streaming):
+    streaming.stream.replies = [["Do a detox. ", "Now."]]
+    streaming.gemini.replies = ["A cleanse then."]
+    _, events = stream(client)
+    assert events[-1]["message"]["body"] == SAFE_FALLBACK and streaming.used == []
+
+
+def test_a_streamed_answer_stopped_at_the_limit_ends_on_its_last_full_sentence(client, streaming):
+    streaming.stream.finish = "MAX_TOKENS"
+    streaming.stream.replies = [["Your lentil stew fits tonight. ", "You could also add a sid"]]
+    _, events = stream(client)
+    assert _shown(events) == "Your lentil stew fits tonight."
+    assert events[-1]["message"]["body"] == "Your lentil stew fits tonight."
+
+
+def test_a_stream_that_fails_before_any_text_stores_only_the_turn_so_post_can_answer_it(client, streaming):
+    streaming.stream.replies = [RuntimeError("unavailable")]
+    mid = uuid.uuid4()
+    _, events = stream(client, "hello", mid)
+    assert events == [{"type": "error"}] and [m.role for m in streaming.db.rows] == ["user"] and streaming.used == []
+    ok = send(client, "hello", mid)  # what the app does next, with the same id
+    assert ok.status_code == 200 and [m.role for m in streaming.db.rows] == ["user", "coach"]
+
+
+def test_a_stream_that_breaks_halfway_stores_no_half_answer(client, streaming):
+    streaming.stream.replies = [["Your lentil stew fits tonight. ", RuntimeError("dropped")]]
+    _, events = stream(client)
+    assert [e["type"] for e in events] == ["delta", "error"]
+    assert [m.role for m in streaming.db.rows] == ["user"]
+
+
+def test_the_same_turn_streamed_again_gets_the_stored_answer_without_asking_again(client, streaming):
+    mid = uuid.uuid4()
+    _, first = stream(client, "hello", mid)
+    _, again = stream(client, "hello", mid)
+    assert [e["type"] for e in again] == ["done"] and again[0]["message"] == first[-1]["message"] | {"suggestions": [], "workouts": []}
+    assert len(streaming.stream.payloads) == 1 and len(streaming.used) == 1
+
+
+def test_a_streamed_turn_answered_before_by_post_is_not_answered_twice(client, streaming):
+    mid = uuid.uuid4()
+    body = send(client, "hello", mid).json()["body"]
+    _, events = stream(client, "hello", mid)
+    assert events[-1]["message"]["body"] == body and streaming.stream.payloads == []
+
+
+def test_a_worrying_message_streams_the_kind_fixed_reply_without_a_model(client, streaming):
+    _, events = stream(client, "I make myself sick after meals")
+    assert [e["type"] for e in events] == ["done"] and events[0]["message"]["body"] == CARE_REPLY
+    assert streaming.stream.payloads == [] and streaming.used == []
+
+
+def test_the_streamed_coach_answers_in_the_apps_language(client, streaming):
+    stream(client, "hola", lang="es")
+    assert "Always reply in Spanish" in streaming.stream.payloads[0][0]["system_instruction"]["parts"][0]["text"]
+
+
+def test_before_the_answer_starts_problems_are_plain_statuses(client, streaming, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.core.rate_limit import coach_turns
+
+    taken = uuid.uuid4()
+    streaming.db.rows.append(CoachMessage(id=taken, user_id=OTHER, role="user", body="x", created_at=T0))
+    assert stream(client, "hi", taken)[0].status_code == 409
+    assert stream(client, "   ")[0].status_code == 422
+    for _ in range(coach_turns.limit):
+        coach_turns.allow("coach", ME)
+    assert stream(client, "two")[0].status_code == 429
+    coach_turns.reset()
+    streaming.db.broken = True
+    assert stream(client, "hi")[0].status_code == 503
+    streaming.db.broken = False
+
+    async def none(db_, user_id):
+        raise HTTPException(status_code=404, detail="Finish setting up your plan first")
+
+    monkeypatch.setattr(router, "_target", none)
+    assert stream(client, "hi")[0].status_code == 404
+    assert streaming.stream.payloads == []
+
+
+def test_the_stream_route_needs_a_login(anon_client):
+    assert anon_client.post("/coach/messages/stream", json={"id": str(uuid.uuid4()), "text": "hi"}).status_code in (401, 403)

@@ -1,7 +1,9 @@
 import asyncio
 import copy
+import json
 import logging
 import time
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -181,3 +183,109 @@ async def _generate(model: str, payload: dict, timeout: float, kind: str) -> dic
                 await asyncio.sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
 
     raise last_exc or RuntimeError("gemini request failed")
+
+
+async def stream_content(payload: dict, timeout: float = 30.0, kind: str | None = None) -> AsyncIterator[dict]:
+    """The same request as generate_content, answered piece by piece: yields
+    each chunk Gemini streams (a GenerateContentResponse with the next bit of
+    text; the last one carries finishReason and usageMetadata).
+
+    Same budget, breaker, thinking setting, key header and fallback model as
+    generate_content. Retries (a 503, a dropped connection, a refused thinking
+    setting) and the switch to the fallback model happen only before the first
+    chunk: once text has been passed on, an error is raised to the caller.
+    """
+    kind = kind or _kind(payload)
+    models = [settings.gemini_model]
+    if settings.gemini_fallback_model and settings.gemini_fallback_model not in models:
+        models.append(settings.gemini_fallback_model)
+    last: Exception | None = None
+    for model in models:
+        passed_on = False
+        try:
+            async for chunk in _stream(model, payload, timeout, kind):
+                passed_on = True
+                yield chunk
+            return
+        except Exception as exc:  # noqa: BLE001
+            if passed_on or not gemini_budget.is_quota_error(exc):
+                raise
+            last = exc
+            if model != models[-1]:
+                log.warning("gemini quota spent for %s; trying %s", model, models[-1])
+    raise last  # type: ignore[misc]
+
+
+def _chunk_of(line: str) -> dict | None:
+    """One server-sent event line ("data: {...}") as a dict; None for blank
+    lines, comments, other fields and anything that is not a JSON object."""
+    if not line.startswith("data:"):
+        return None
+    raw = line[5:].strip()
+    if not raw or raw == "[DONE]":
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def _stream(model: str, payload: dict, timeout: float, kind: str) -> AsyncIterator[dict]:
+    global _thinking_rejected
+    gemini_budget.check(kind, model=model)
+    # alt=sse asks for server-sent events. The key stays in the header (see _generate).
+    url = f"{settings.gemini_base_url}/models/{model}:streamGenerateContent?alt=sse"
+    started = time.monotonic()
+    body = _with_thinking(payload, model)
+    sent_thinking = body is not payload
+    last_exc: Exception | None = None
+    passed_on = False
+
+    async with httpx.AsyncClient() as client:
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                async with client.stream(
+                    "POST", url, headers={"x-goog-api-key": settings.gemini_api_key}, json=body, timeout=timeout
+                ) as response:
+                    if response.status_code < 400:
+                        gemini_budget.record_call(model=model)
+                        usage: dict = {}
+                        async for line in response.aiter_lines():
+                            chunk = _chunk_of(line)
+                            if chunk is None:
+                                continue
+                            usage = chunk.get("usageMetadata") or usage
+                            passed_on = True
+                            yield chunk
+                        _log_call(payload, {"usageMetadata": usage}, attempt, started, kind, model)
+                        return
+
+                    await response.aread()
+                    text = response.text
+                    log.error("gemini error %s (attempt %d/%d): %s", response.status_code, attempt, MAX_ATTEMPTS, text[:500])
+                    if response.status_code == 429:
+                        gemini_budget.note_rejected(text, model=model)
+                    if response.status_code == 400 and sent_thinking and "thinking" in text.lower():
+                        log.warning("gemini rejected thinkingConfig; sending without it from now on")
+                        _thinking_rejected = True
+                        sent_thinking = False
+                        body = payload
+                        continue
+                    last_exc = httpx.HTTPStatusError(
+                        f"gemini returned {response.status_code}", request=response.request, response=response
+                    )
+                    if response.status_code not in RETRYABLE_STATUSES:
+                        raise last_exc
+            except httpx.TransportError as exc:
+                if passed_on:
+                    # Text was already passed on: asking again would repeat it.
+                    raise
+                last_exc = exc
+                log.warning("gemini transport error (attempt %d/%d): %s", attempt, MAX_ATTEMPTS, exc)
+
+            if attempt < MAX_ATTEMPTS:
+                await asyncio.sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
+
+    raise last_exc or RuntimeError("gemini request failed")
+
