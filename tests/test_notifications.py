@@ -282,6 +282,24 @@ def _with_db(db):
     app.dependency_overrides[get_db] = fake_db
 
 
+def _job_session(db, monkeypatch):
+    """The hourly job opens its own session (it runs after the answer has gone),
+    so it gets the fake database through async_session_maker, not get_db."""
+    from app.routers import notifications as router
+
+    class _Session:
+        async def __aenter__(self):
+            return db
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(router, "async_session_maker", lambda: _Session())
+    monkeypatch.setattr(router, "_hour_done", None)
+    router.last_run.clear()
+    return router
+
+
 PREFS_ROW = SimpleNamespace(
     user_id=ME, friend_snaps=True, reactions=False, streak_reminders=True, milestones=True,
     meal_nudge_hour=None, quiet_start=22, quiet_end=8, utc_offset_minutes=120, paused_until=None,
@@ -356,9 +374,128 @@ def test_the_streak_cron_with_nobody_registered_does_nothing(client, monkeypatch
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "cron_secret", "s3cret")
-    _with_db(_Db(_Result(rows=[]), _Result()))  # no device owners; log cleanup
+    router = _job_session(_Db(_Result(rows=[]), _Result()), monkeypatch)  # no device owners; log cleanup
     r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
-    assert r.status_code == 200 and r.json() == {"checked": 0, "sent": 0}
+    assert r.status_code == 202 and r.json() == {"status": "started"}
+    assert router.last_run == {"checked": 0, "sent": 0}
+
+
+def test_the_job_answers_at_once_and_works_afterwards(client, monkeypatch):
+    """cron-job.org gives up after 30 s and switches a job off after ~25 failures in
+    a row; Render alone can take 30-60 s to wake. So the answer may not wait for the work."""
+    from app.core.config import settings
+    from app.routers import notifications as router
+
+    monkeypatch.setattr(settings, "cron_secret", "s3cret")
+    order = []
+
+    async def slow_job(now):
+        order.append("work")
+
+    monkeypatch.setattr(router, "_run_job", slow_job)
+    r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+    order.append("answered")
+    assert r.status_code == 202 and r.json() == {"status": "started"}
+    assert order == ["work", "answered"], "the test client runs background work before returning"
+
+
+def test_get_works_too_because_it_is_cron_job_orgs_default(client, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "cron_secret", "s3cret")
+    router = _job_session(_Db(_Result(rows=[]), _Result()), monkeypatch)
+    assert client.get("/notifications/cron/streak-reminders").status_code == 403
+    r = client.get("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+    assert r.status_code == 202 and router.last_run == {"checked": 0, "sent": 0}
+
+
+def test_a_second_call_while_a_run_is_going_does_not_start_another(client, monkeypatch):
+    from app.core.config import settings
+    from app.routers import notifications as router
+
+    monkeypatch.setattr(settings, "cron_secret", "s3cret")
+    started = []
+
+    async def fake_job(now):
+        started.append(now)
+
+    monkeypatch.setattr(router, "_run_job", fake_job)
+    monkeypatch.setattr(router, "_job_lock", SimpleNamespace(locked=lambda: True))
+    r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+    assert r.status_code == 202 and r.json() == {"status": "already_running"} and started == []
+
+
+def test_calls_every_10_minutes_do_the_work_once_an_hour(client, monkeypatch):
+    """Calling often keeps Render's free server awake; the work itself stays hourly."""
+    from app.core.config import settings
+    from app.routers import notifications as router
+
+    monkeypatch.setattr(settings, "cron_secret", "s3cret")
+    sessions = []
+
+    def run_at(hour, minute):
+        monkeypatch.setattr(router, "_utcnow", lambda: at(hour, minute))
+        db = _Db(_Result(rows=[]), _Result())  # no device owners; log cleanup
+        sessions.append(db)
+        router.last_run.clear()
+        r = client.get("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+        assert r.status_code == 202
+        return dict(router.last_run)
+
+    _job_session(_Db(), monkeypatch)
+    monkeypatch.setattr(router, "async_session_maker", lambda: _SessionFor(sessions[-1]))
+    assert run_at(12, 0) == {"checked": 0, "sent": 0}
+    assert run_at(12, 10) == {}, "same hour: no work, the call only kept the server awake"
+    assert run_at(12, 50) == {}
+    assert run_at(13, 0) == {"checked": 0, "sent": 0}, "a new hour: the work runs again"
+
+
+def test_a_failed_run_is_tried_again_on_the_next_call(client, monkeypatch):
+    """If the run at 12:00 fails (say the server was still waking), 12:10 does the work."""
+    from app.core.config import settings
+    from app.routers import notifications as router
+
+    monkeypatch.setattr(settings, "cron_secret", "s3cret")
+
+    class _Broken(_Db):
+        async def execute(self, stmt):
+            raise RuntimeError("database down")
+
+    _job_session(_Broken(), monkeypatch)
+    monkeypatch.setattr(router, "_utcnow", lambda: at(12, 0))
+    client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+    assert router.last_run == {}
+    monkeypatch.setattr(router, "async_session_maker", lambda: _SessionFor(_Db(_Result(rows=[]), _Result())))
+    monkeypatch.setattr(router, "_utcnow", lambda: at(12, 10))
+    client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+    assert router.last_run == {"checked": 0, "sent": 0}
+
+
+class _SessionFor:
+    def __init__(self, db):
+        self.db = db
+
+    async def __aenter__(self):
+        return self.db
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def test_a_failing_run_is_logged_not_raised(client, monkeypatch, caplog):
+    from app.core.config import settings
+    from app.routers import notifications as router
+
+    monkeypatch.setattr(settings, "cron_secret", "s3cret")
+
+    class _Broken(_Db):
+        async def execute(self, stmt):
+            raise RuntimeError("database down")
+
+    _job_session(_Broken(), monkeypatch)
+    r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+    assert r.status_code == 202 and router.last_run == {}
+    assert "cron job failed" in caplog.text
 
 
 # --- reminders about your own logging ---------------------------------------
@@ -644,9 +781,12 @@ def _cron(client, monkeypatch, *, hour, inputs=None, prefs_rows=(), statuses=("d
     monkeypatch.setattr(progress_read, "load_inputs", fake_load)
     monkeypatch.setattr(language_pref, "recall", fake_recall)
     db = _CronDb(_Result(rows=[ME]), _Result(rows=list(prefs_rows)), _Result())  # device owners; prefs; log cleanup
-    _with_db(db)
+    _job_session(db, monkeypatch)
     r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
-    return r, calls, loads, db
+    assert r.status_code == 202
+    # The counts are in last_run (the answer went back before the work); wrapped
+    # so the tests below read them the way they read an answer.
+    return SimpleNamespace(json=lambda: dict(router.last_run), status_code=200), calls, loads, db
 
 
 def _inputs(rows):

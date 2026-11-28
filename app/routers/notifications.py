@@ -1,16 +1,18 @@
+import asyncio
 import logging
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import async_session_maker, get_db
 from app.core.language import get_language
 from app.core.rate_limit import push_tests
 from app.core.security import get_current_user_id
@@ -231,30 +233,90 @@ async def _send_milestone(db: AsyncSession, uid: uuid.UUID, prefs, local: dateti
     return None
 
 
-@router.post("/cron/streak-reminders")
-async def streak_reminders(
-    x_cron_secret: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_db),
-):
-    """For a scheduler, run hourly. Sends the reminders that are due for each
-    person at their own local time, each at most once a day (the day's dedupe
-    key) and always through the daily cap, quiet hours and switches:
+# One run at a time in this process (a slow run and the next call must not
+# overlap; the dedupe keys would still stop double sends, but not double work).
+_job_lock = asyncio.Lock()
 
-    - afternoon: "you haven't logged anything today"
-    - evening: "your logging streak ends tonight" (only with a running streak)
-    - evening: "your streak with a friend ends tonight" (a bite is owed)
-    - daytime: a freeze covered yesterday, a new badge or a new level (one a run)
+# What the last finished run did, for tests and the log line.
+last_run: dict = {}
 
-    Disabled until CRON_SECRET is set. The path keeps its old name so an
-    existing schedule keeps working.
-    """
+# The UTC hour ("2026-11-28T14") whose work this process has finished. The
+# scheduler may call every 10 minutes (that also keeps Render's free server
+# awake, so the call doesn't time out while it wakes); the per-person work
+# still runs once an hour. Lost on a restart, which only means one extra run:
+# the dedupe keys stop anything being sent twice.
+_hour_done: str | None = None
+
+
+def _check_cron_secret(x_cron_secret: str | None) -> None:
     if not settings.cron_secret:
         raise HTTPException(404, "Not found")
     # Bytes: compare_digest raises on a non-ASCII str, which was a 500.
     if not x_cron_secret or not secrets.compare_digest(x_cron_secret.encode(), settings.cron_secret.encode()):
         raise HTTPException(403, "Forbidden")
 
-    now = _utcnow()
+
+@router.post("/cron/streak-reminders", status_code=202)
+@router.get("/cron/streak-reminders", status_code=202, operation_id="streak_reminders_get")
+async def streak_reminders(background: BackgroundTasks, x_cron_secret: str | None = Header(default=None)):
+    """For a scheduler (cron-job.org): every 10 minutes is best (it keeps the
+    server awake), hourly at least. Answers at once with 202 and does the work
+    straight after, in the background, at most once per hour.
+
+    Why at once: cron-job.org gives up after 30 seconds ("Failed (timeout)")
+    and switches a job off after about 25 failures in a row. Render's free
+    server takes 30-60 s just to wake up, and the work itself grows with every
+    person who has notifications on, so answering only after the work made the
+    job fail (owner, 28 Nov 2026: "the cronjob.org thing we set up failed").
+    GET as well as POST because GET is cron-job.org's default method.
+
+    The work (see _send_reminders) sends what is due for each person at their
+    own local time, each at most once a day, always through the daily cap,
+    quiet hours and switches.
+    Disabled until CRON_SECRET is set. The path keeps its old name so an
+    existing schedule keeps working.
+    """
+    _check_cron_secret(x_cron_secret)
+    if _job_lock.locked():
+        return {"status": "already_running"}
+    background.add_task(_run_job, _utcnow())
+    return {"status": "started"}
+
+
+async def _run_job(now: datetime) -> None:
+    """The background part. Never raises: nobody is waiting for the answer,
+    so a failure can only be seen in the Render log ("cron job failed")."""
+    global _hour_done
+    if _job_lock.locked():
+        return
+    async with _job_lock:
+        hour = now.strftime("%Y-%m-%dT%H")
+        if hour == _hour_done:
+            return  # this hour's work is done; this call only kept the server awake
+        started = time.monotonic()
+        try:
+            async with async_session_maker() as db:
+                results = await _send_reminders(db, now)
+        except Exception:  # noqa: BLE001
+            log.exception("cron job failed")
+            return
+        _hour_done = hour
+        last_run.clear()
+        last_run.update(results)
+        log.info(
+            "cron job done checked=%s sent=%s secs=%.1f",
+            results["checked"], results["sent"], time.monotonic() - started,
+        )
+
+
+async def _send_reminders(db: AsyncSession, now: datetime) -> dict:
+    """Everything due right now, for everyone with a registered device:
+
+    - afternoon: "you haven't logged anything today"
+    - evening: "your logging streak ends tonight" (only with a running streak)
+    - evening: "your streak with a friend ends tonight" (a bite is owed)
+    - daytime: a freeze covered yesterday, a new badge or a new level (one a run)
+    """
     user_ids = (await db.execute(select(DeviceToken.user_id).distinct())).scalars().all()
     pref_rows = {
         r.user_id: r
