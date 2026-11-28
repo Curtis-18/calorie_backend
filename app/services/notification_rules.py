@@ -138,8 +138,10 @@ _COPY: dict[Kind, list[tuple[str, str]]] = {
     Kind.STREAK_FREEZE: [
         ("🧊 A freeze covered yesterday", "Your {count}-day flame is safe."),
     ],
+    # Picked by line (BADGE_LINE, LEVEL_LINE), not by hash: each needs its own values.
+    # "You earned it" was the badge's first wording: "earn" is a banned word.
     Kind.MILESTONE: [
-        ("🏅 New badge: {name}", "You earned it. Come and see."),
+        ("🏅 New badge: {name}", "Come and see it in your progress."),
         ("⭐ Level {count}!", "Every meal you log is paying off."),
     ],
     Kind.LOG_REMINDER: [
@@ -186,13 +188,18 @@ ANNOUNCEMENTS: dict[str, tuple[str, str]] = {
 }
 
 
-def copy_for(kind: Kind, key: str, lang: str = "en", **ctx) -> tuple[str, str]:
+def copy_for(kind: Kind, key: str, lang: str = "en", *, variant: int | None = None, **ctx) -> tuple[str, str]:
+    """[variant] picks a line by position (milestones: a badge and a level need
+    different values); without it the line is chosen by a stable hash."""
     if kind is Kind.ANNOUNCEMENT:
         # Newest first: a caller that names no release gets the latest one.
         title, body = ANNOUNCEMENTS[ctx.get("release") or next(iter(ANNOUNCEMENTS))]
         return t(lang, title), t(lang, body)
     options = _COPY[kind]
-    index = int(hashlib.sha256(f"{kind.value}:{key}".encode()).hexdigest(), 16) % len(options)
+    if variant is not None:
+        index = variant % len(options)
+    else:
+        index = int(hashlib.sha256(f"{kind.value}:{key}".encode()).hexdigest(), 16) % len(options)
     title, body = options[index]
     values = {"name": "", "emoji": "", "count": 0}
     values.update(ctx)
@@ -248,3 +255,38 @@ def own_reminders(local_hour: int, *, logged_today: bool, streak: int) -> list[t
     if in_window(local_hour, LOG_REMINDER_WINDOW):
         due.append((Kind.LOG_REMINDER, "nolog"))
     return due
+
+
+# --- badges, levels and streak freezes ---------------------------------------
+
+# Local hours in which this news may go (quiet hours, pause and the cap still apply).
+MILESTONE_WINDOW = (10, 20)
+
+# Which line of _COPY[Kind.MILESTONE] each event uses.
+BADGE_LINE, LEVEL_LINE = 0, 1
+
+# Badges about weighing yourself are never announced: push text is never about
+# weight (principle 4), and it shows on lock screens. They still show in the app.
+QUIET_BADGES = frozenset({"on_the_scale", "check_in_champ"})
+
+
+def milestone_events(now_progress: dict, before_progress: dict, today: date) -> list[tuple[Kind, str, dict]]:
+    """What happened today worth a notification, as (kind, dedupe key, values),
+    most timely first. Good news only.
+
+    [now_progress] is compute_progress for [today]; [before_progress] the same
+    inputs for the day before (badges and levels are worked out when read, never
+    stored, so "new" means "not there yesterday").
+    """
+    events: list[tuple[Kind, str, dict]] = []
+    yesterday = today - timedelta(days=1)
+    streak = now_progress["streak"]
+    if yesterday in streak["frozen_days"] and streak["current"] > 0:
+        events.append((Kind.STREAK_FREEZE, f"freeze:{yesterday.isoformat()}", {"count": streak["current"]}))
+    for a in now_progress["achievements"]:
+        if a["unlocked"] and a["unlocked_on"] == today and a["id"] not in QUIET_BADGES:
+            events.append((Kind.MILESTONE, f"badge:{a['id']}", {"name": a["title"], "variant": BADGE_LINE}))
+    level_now = now_progress["level"]["level"]
+    if level_now > before_progress["level"]["level"]:
+        events.append((Kind.MILESTONE, f"level:{level_now}", {"count": level_now, "variant": LEVEL_LINE}))
+    return events

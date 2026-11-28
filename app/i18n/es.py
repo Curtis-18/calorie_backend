@@ -76,7 +76,7 @@ TABLE = {
     "🧊 A freeze covered yesterday": "🧊 Un congelador cubrió ayer",
     "Your {count}-day flame is safe.": "Tu llama de {count} días está a salvo.",
     "🏅 New badge: {name}": "🏅 Nueva insignia: {name}",
-    "You earned it. Come and see.": "Te lo has ganado. Ven a verlo.",
+    "Come and see it in your progress.": "Ven a verla en tu progreso.",
     "⭐ Level {count}!": "⭐ ¡Nivel {count}!",
     "Every meal you log is paying off.": "Cada comida que registras da sus frutos.",
     "🍽️ Nothing logged yet today": "🍽️ Aún no has registrado nada hoy",

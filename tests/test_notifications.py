@@ -511,3 +511,213 @@ async def test_notify_from_puts_the_doers_username_in_the_text(monkeypatch):
     monkeypatch.setattr(notifier, "notify", fake_notify)
     assert await notifier.notify_from(ME, Kind.FRIEND_REQUEST, SAM, dedupe_key="k") == "sent"
     assert seen == {"kind": Kind.FRIEND_REQUEST, "ctx": {"name": "sam"}, "key": "k"}
+
+
+# --- badges, levels and streak freezes (NEXT_STEPS step 6) ----------------------
+
+import re  # noqa: E402
+from datetime import date  # noqa: E402
+
+from app.services.notification_rules import (  # noqa: E402
+    BADGE_LINE,
+    LEVEL_LINE,
+    MILESTONE_WINDOW,
+    milestone_events,
+)
+from app.services.progress_read import ProgressInputs  # noqa: E402
+from app.services.progress_service import LogRow, compute_progress  # noqa: E402
+
+DAY = date(2026, 11, 5)  # the same day as at(...)
+
+
+def _log(d, source="manual", meal="lunch"):
+    return LogRow(d, meal, source, 500, 20.0, None)
+
+
+def _progress(rows, day=DAY, weigh_ins=()):
+    return compute_progress(rows, today=day, calorie_target=None, protein_target=None, weigh_in_dates=list(weigh_ins))
+
+
+def _events(rows, day=DAY, weigh_ins=()):
+    return milestone_events(_progress(rows, day, weigh_ins), _progress(rows, day - timedelta(days=1), weigh_ins), day)
+
+
+def _freeze_week():
+    """Seven days logged (a freeze is kept on day 7), then yesterday missed."""
+    return [_log(DAY - timedelta(days=n)) for n in range(2, 9)]
+
+
+def test_a_badge_unlocked_today_is_news_with_the_badge_line():
+    assert _events([_log(DAY)]) == [(Kind.MILESTONE, "badge:first_bite", {"name": "First Bite", "variant": BADGE_LINE})]
+
+
+def test_a_badge_unlocked_on_an_earlier_day_is_not_news():
+    assert _events([_log(DAY - timedelta(days=1))]) == []
+    assert _events([]) == []
+
+
+def test_badges_about_weighing_yourself_are_never_announced():
+    events = _events([], weigh_ins=[DAY])
+    assert events == [], "push text is never about weight"
+
+
+def test_a_new_level_is_news_with_the_level_line():
+    now = {"streak": {"frozen_days": [], "current": 4}, "achievements": [], "level": {"level": 3}}
+    before = {"streak": {"frozen_days": [], "current": 3}, "achievements": [], "level": {"level": 2}}
+    assert milestone_events(now, before, DAY) == [(Kind.MILESTONE, "level:3", {"count": 3, "variant": LEVEL_LINE})]
+    assert milestone_events(now, now, DAY) == []
+
+
+def test_a_freeze_that_covered_yesterday_is_news():
+    events = _events(_freeze_week())
+    assert events == [(Kind.STREAK_FREEZE, "freeze:2026-11-04", {"count": 7})]
+
+
+def test_freeze_news_comes_first_then_badges():
+    events = _events(_freeze_week() + [_log(DAY, source="photo")])
+    assert [key for _, key, _ in events][:2] == ["freeze:2026-11-04", "badge:snapshot"]
+
+
+def test_the_badge_and_level_lines_read_right():
+    assert copy_for(Kind.MILESTONE, "badge:first_bite", variant=BADGE_LINE, name="First Bite") == (
+        "🏅 New badge: First Bite", "Come and see it in your progress.")
+    assert copy_for(Kind.MILESTONE, "level:4", variant=LEVEL_LINE, count=4)[0] == "⭐ Level 4!"
+    assert copy_for(Kind.STREAK_FREEZE, "freeze:x", count=7) == ("🧊 A freeze covered yesterday", "Your 7-day flame is safe.")
+
+
+def test_milestone_copy_never_says_earn_in_any_language():
+    """"You earned it" was the first wording; "earn" is on the banned list (and so are
+    its translations: ganado, mérité, verdient, mereceu, guadagnato)."""
+    from app.i18n import TABLES
+    from app.services.notification_rules import _COPY
+
+    old = ("ganad", "mérit", "verdien", "merece", "guadagn")
+    for kind in (Kind.MILESTONE, Kind.STREAK_FREEZE):
+        for title, body in _COPY[kind]:
+            assert not re.search(r"\bearn", f"{title} {body}", re.I), (title, body)
+            for lang in ("es", "fr", "de", "pt", "it"):
+                for text, original in ((TABLES[lang][title], title), (TABLES[lang][body], body)):
+                    assert not any(w in text.lower() for w in old), (lang, text)
+                    for ph in ("{name}", "{count}"):
+                        assert (ph in text) == (ph in original), (lang, original)
+                    assert not any(word in text.lower() for word in BANNED), (lang, text)
+
+
+def test_milestone_news_goes_in_the_daytime():
+    assert MILESTONE_WINDOW == (10, 20)
+
+
+class _CronDb(_Db):
+    def __init__(self, *results):
+        super().__init__(*results)
+        self.rolled_back = 0
+
+    async def rollback(self):
+        self.rolled_back += 1
+
+
+def _cron(client, monkeypatch, *, hour, inputs=None, prefs_rows=(), statuses=("dry_run",), lang="en", fail=False):
+    """Runs the hourly job for one person with a device, at [hour] UTC on DAY.
+    Returns (response, notify calls, how often the history was loaded, db)."""
+    from app.core.config import settings
+    from app.routers import notifications as router
+    from app.services import language_pref, progress_read
+
+    monkeypatch.setattr(settings, "cron_secret", "s3cret")
+    monkeypatch.setattr(router, "_utcnow", lambda: at(hour))
+    calls, loads, answers = [], [], list(statuses)
+
+    async def fake_notify(db, uid, kind, *, dedupe_key=None, now=None, **ctx):
+        calls.append((kind, dedupe_key, ctx))
+        return answers.pop(0) if answers else "dry_run"
+
+    async def fake_load(db, uid, today):
+        loads.append(today)
+        if fail:
+            raise RuntimeError("database hiccup")
+        return inputs
+
+    async def fake_recall(db, uid):
+        return lang
+
+    monkeypatch.setattr(router, "notify", fake_notify)
+    monkeypatch.setattr(progress_read, "load_inputs", fake_load)
+    monkeypatch.setattr(language_pref, "recall", fake_recall)
+    db = _CronDb(_Result(rows=[ME]), _Result(rows=list(prefs_rows)), _Result())  # device owners; prefs; log cleanup
+    _with_db(db)
+    r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+    return r, calls, loads, db
+
+
+def _inputs(rows):
+    return ProgressInputs(rows=rows, calorie_target=None, protein_target=None, weigh_in_dates=[])
+
+
+def test_the_hourly_job_sends_a_badge_unlocked_today_in_the_persons_language(client, monkeypatch):
+    from app.i18n import t
+
+    r, calls, loads, _ = _cron(client, monkeypatch, hour=12, inputs=_inputs([_log(DAY)]), lang="es")
+    assert r.status_code == 200 and r.json() == {"checked": 1, "sent": 1}
+    assert loads == [DAY]
+    assert calls == [(Kind.MILESTONE, "badge:first_bite", {"name": t("es", "First Bite"), "variant": BADGE_LINE})]
+
+
+def test_the_hourly_job_moves_past_one_already_sent_and_sends_at_most_one(client, monkeypatch):
+    rows = [_log(DAY, source="photo")]  # first_bite and snapshot, both today
+    r, calls, _, _ = _cron(client, monkeypatch, hour=12, inputs=_inputs(rows), statuses=("duplicate", "dry_run"))
+    assert [key for _, key, _ in calls] == ["badge:first_bite", "badge:snapshot"]
+    assert r.json() == {"checked": 1, "sent": 1}
+
+
+def test_the_rules_saying_no_stops_the_run_for_that_person(client, monkeypatch):
+    rows = [_log(DAY, source="photo")]
+    r, calls, _, _ = _cron(client, monkeypatch, hour=12, inputs=_inputs(rows), statuses=("daily_cap",))
+    assert len(calls) == 1 and r.json()["sent"] == 0
+
+
+def test_nothing_is_loaded_outside_the_daytime_window(client, monkeypatch):
+    r, calls, loads, _ = _cron(client, monkeypatch, hour=9, inputs=_inputs([_log(DAY)]))
+    assert r.json() == {"checked": 0, "sent": 0} and loads == [] and calls == []
+
+
+def _prefs(**over):
+    values = {**PREFS_ROW.__dict__, "utc_offset_minutes": 0, **over}
+    return SimpleNamespace(**values)
+
+
+def test_with_both_switches_off_the_history_is_not_even_loaded(client, monkeypatch):
+    r, calls, loads, _ = _cron(
+        client, monkeypatch, hour=12, inputs=_inputs([_log(DAY)]),
+        prefs_rows=[_prefs(milestones=False, streak_reminders=False)],
+    )
+    assert loads == [] and calls == [] and r.json()["sent"] == 0
+
+
+def test_each_kind_follows_its_own_switch(client, monkeypatch):
+    rows = _freeze_week() + [_log(DAY, source="photo")]  # a freeze covered yesterday, and a badge today
+    _, calls, _, _ = _cron(client, monkeypatch, hour=12, inputs=_inputs(rows), prefs_rows=[_prefs(streak_reminders=False)])
+    assert [(k, key) for k, key, _ in calls] == [(Kind.MILESTONE, "badge:snapshot")]
+    _, calls, _, _ = _cron(client, monkeypatch, hour=12, inputs=_inputs(rows), prefs_rows=[_prefs(milestones=False)])
+    assert [(k, key) for k, key, _ in calls] == [(Kind.STREAK_FREEZE, "freeze:2026-11-04")]
+
+
+def test_quiet_hours_stop_milestone_news_before_anything_is_loaded(client, monkeypatch):
+    _, calls, loads, _ = _cron(
+        client, monkeypatch, hour=12, inputs=_inputs([_log(DAY)]), prefs_rows=[_prefs(quiet_start=11, quiet_end=13)],
+    )
+    assert loads == [] and calls == []
+
+
+def test_one_persons_failure_is_rolled_back_and_the_job_still_answers(client, monkeypatch):
+    r, calls, _, db = _cron(client, monkeypatch, hour=12, fail=True)
+    assert r.status_code == 200 and calls == [] and db.rolled_back == 1 and db.committed
+
+
+@pytest.mark.asyncio
+async def test_notify_passes_the_chosen_line_through(sent):
+    """The real notifier, not a fake: the level line is used whatever the key hashes to."""
+    for key in ("level:2", "level:3", "level:4", "level:5"):
+        sent.clear()
+        db = _Db(_Result(rows=["tok-1"]), _Result(None), _Result(0), _Result(ME), _Result())
+        assert await _notify(db, Kind.MILESTONE, dedupe_key=key, count=4, variant=LEVEL_LINE) == "dry_run"
+        assert sent[0][1] == "⭐ Level 4!", key

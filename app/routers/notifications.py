@@ -22,17 +22,20 @@ from app.schemas.notifications import DeviceIn, DeviceRemoveIn, PrefsIn, PrefsOu
 from app.models.food_log import FoodLog
 from app.services.notification_rules import (
     LOG_REMINDER_WINDOW,
+    MILESTONE_WINDOW,
     MY_STREAK_WINDOW,
     ANNOUNCEMENTS,
     Kind,
+    decide,
     in_reminder_window,
     in_window,
     local_time,
+    milestone_events,
     own_reminders,
     pick_streak_to_save,
 )
 from app.services.progress_service import LogRow, compute_progress
-from app.services import announcements, push_sender
+from app.services import announcements, language_pref, progress_read, push_sender
 from app.services.notifier import notify, prefs_from_row
 from app.services.snap_streaks import streaks_with
 
@@ -41,6 +44,11 @@ log = logging.getLogger("calorie_backend")
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 LOG_KEEP = timedelta(days=7)
+
+
+def _utcnow() -> datetime:
+    """The scheduler's clock, one place so tests can set it."""
+    return datetime.now(timezone.utc)
 
 
 def _out(row: NotificationPrefs | None) -> dict:
@@ -198,6 +206,31 @@ async def _logging_state(db: AsyncSession, uid: uuid.UUID, today) -> tuple[int, 
     return progress["streak"]["current"], progress["streak"]["logged_today"]
 
 
+async def _send_milestone(db: AsyncSession, uid: uuid.UUID, prefs, local: datetime, now: datetime) -> str | None:
+    """At most one piece of good news (a freeze that covered yesterday, a new
+    badge, a new level), or None when there is nothing to tell. Each event has
+    its own dedupe key, so the next hourly run moves on to the next one."""
+    # Only load the person's history when something could actually be sent.
+    allowed = {k for k in (Kind.STREAK_FREEZE, Kind.MILESTONE) if decide(k, prefs, now, 0).allowed}
+    if not allowed:
+        return None
+    today = local.date()
+    lang = await language_pref.recall(db, uid)
+    inputs = await progress_read.load_inputs(db, uid, today)
+    events = milestone_events(
+        progress_read.progress_on(inputs, today, lang),
+        progress_read.progress_on(inputs, today - timedelta(days=1), lang),
+        today,
+    )
+    for kind, key, values in events:
+        if kind not in allowed:
+            continue
+        status = await notify(db, uid, kind, dedupe_key=key, now=now, **values)
+        if status != "duplicate":
+            return status  # sent, or the rules said no for now: either way, one a run
+    return None
+
+
 @router.post("/cron/streak-reminders")
 async def streak_reminders(
     x_cron_secret: str | None = Header(default=None),
@@ -210,6 +243,7 @@ async def streak_reminders(
     - afternoon: "you haven't logged anything today"
     - evening: "your logging streak ends tonight" (only with a running streak)
     - evening: "your streak with a friend ends tonight" (a bite is owed)
+    - daytime: a freeze covered yesterday, a new badge or a new level (one a run)
 
     Disabled until CRON_SECRET is set. The path keeps its old name so an
     existing schedule keeps working.
@@ -220,7 +254,7 @@ async def streak_reminders(
     if not x_cron_secret or not secrets.compare_digest(x_cron_secret.encode(), settings.cron_secret.encode()):
         raise HTTPException(403, "Forbidden")
 
-    now = datetime.now(timezone.utc)
+    now = _utcnow()
     user_ids = (await db.execute(select(DeviceToken.user_id).distinct())).scalars().all()
     pref_rows = {
         r.user_id: r
@@ -241,7 +275,8 @@ async def streak_reminders(
         day = local.date().isoformat()
         wants_pair = in_reminder_window(local.hour)
         wants_own = in_window(local.hour, LOG_REMINDER_WINDOW) or in_window(local.hour, MY_STREAK_WINDOW)
-        if not (wants_pair or wants_own):
+        wants_milestone = in_window(local.hour, MILESTONE_WINDOW)
+        if not (wants_pair or wants_own or wants_milestone):
             continue
         results["checked"] += 1
 
@@ -255,6 +290,16 @@ async def streak_reminders(
                 log.exception("logging reminder failed for a user")
                 # A failed statement leaves the transaction aborted: without
                 # this, everyone after them failed as well.
+                await db.rollback()
+
+        # Before the friend streaks: that block ends early with `continue`.
+        if wants_milestone:
+            try:
+                status = await _send_milestone(db, uid, prefs, local, now)
+                if status is not None:
+                    counted(status)
+            except Exception:  # noqa: BLE001 - one person's failure must not stop the rest
+                log.exception("milestone notification failed for a user")
                 await db.rollback()
 
         if wants_pair:
