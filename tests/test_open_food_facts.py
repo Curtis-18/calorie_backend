@@ -43,6 +43,17 @@ def test_a_product_becomes_a_per_100g_result_with_minerals_in_milligrams():
     assert r.fiber_g_per_100g == 0 and r.sugar_g_per_100g == 56.3
 
 
+def test_a_product_sold_by_volume_is_per_100_ml():
+    """A 330 ml cola says "product_quantity_unit": "ml" and its _100g values are per 100 ml."""
+    assert off._result_from_product(_product(product_quantity_unit="ml")).per_unit == "ml"
+    assert off._result_from_product(_product(product_quantity_unit="g")).per_unit == "g"
+    assert off._result_from_product(_product()).per_unit == "g", "no unit: grams, as before"
+
+
+def test_the_volume_unit_is_asked_for():
+    assert "product_quantity_unit" in off._FIELDS.split(",")
+
+
 def test_a_missing_nutrient_is_unknown_not_zero():
     p = _product()
     del p["nutriments"]["sodium_100g"], p["nutriments"]["fiber_100g"]

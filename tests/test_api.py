@@ -547,6 +547,7 @@ def test_food_search_returns_mapped_results(client, monkeypatch):
                 "carbs_g_per_100g": 13.8,
                 "fat_g_per_100g": 0.17,
                 **_NO_EXTRAS,
+                "per_unit": "g",  # lab data is per 100 g; Branded drinks say "ml"
             }
         ],
     }

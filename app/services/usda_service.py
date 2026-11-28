@@ -102,6 +102,17 @@ def is_plausible(nutrients: dict, alcohol_g: float = 0.0) -> bool:
     return 0.35 <= calories / expected <= 1.6
 
 
+_ML_UNITS = {"ml", "mlt", "milliliter", "millilitre", "milliliters", "millilitres"}
+
+
+def _per_unit(food: dict) -> str:
+    """Branded liquids are labelled per 100 ml ("servingSizeUnit": "ml", seen on
+    a live orange juice search, 28 Nov 2026); everything else is per 100 g.
+    Reading those as grams made a drink's amount slightly wrong (about 10% for oil)."""
+    unit = str(food.get("servingSizeUnit") or "").strip().lower()
+    return "ml" if food.get("dataType") == "Branded" and unit in _ML_UNITS else "g"
+
+
 def _result_from_food(food: dict) -> FoodSearchResult | None:
     """One USDA search hit as our result, or None when it can't be used."""
     fdc_id = food.get("fdcId")
@@ -124,6 +135,7 @@ def _result_from_food(food: dict) -> FoodSearchResult | None:
         carbs_g_per_100g=nutrients["carbs_g"],
         fat_g_per_100g=nutrients["fat_g"],
         **_extract_extras(food),
+        per_unit=_per_unit(food),
     )
 
 

@@ -17,6 +17,11 @@ class FoodSearchResult(BaseModel):
     sodium_mg_per_100g: float | None = None
     iron_mg_per_100g: float | None = None
     calcium_mg_per_100g: float | None = None
+    # What the *_per_100g numbers are per: "g" (100 g) or "ml" (100 ml). Drinks
+    # are labelled per 100 ml (USDA Branded liquids, Open Food Facts products
+    # sold by volume), so the app asks for millilitres for them. The field names
+    # keep "100g" so older apps, which ignore this, still work as before.
+    per_unit: str = "g"
 
 
 class FoodSearchResponse(BaseModel):

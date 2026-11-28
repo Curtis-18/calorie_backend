@@ -6,7 +6,7 @@ used commercially if it is credited, which the app does on the barcode result)
 covers much of the rest of the world.
 
 Rules, the same as for USDA:
-- Per 100 g, in the same `FoodSearchResult` shape. It has no FDC id, so
+- Per 100 g (per 100 ml for drinks, see `_per_unit`), in the same `FoodSearchResult` shape. It has no FDC id, so
   `fdc_id` is 0 and `data_type` is "Open Food Facts".
 - A value it doesn't have is unknown, never zero. Open Food Facts stores
   minerals in grams, so they are converted to milligrams.
@@ -27,7 +27,7 @@ from app.services.usda_service import is_plausible
 log = logging.getLogger("calorie_backend")
 
 DATA_TYPE = "Open Food Facts"
-_FIELDS = "product_name,brands,nutriments"
+_FIELDS = "product_name,brands,nutriments,product_quantity_unit"
 _USER_AGENT = "NuStreak-Backend/1.0"
 
 
@@ -41,6 +41,14 @@ def _num(nutriments: dict, key: str) -> float | None:
 def _milligrams(nutriments: dict, key: str) -> float | None:
     grams = _num(nutriments, key)
     return None if grams is None else round(grams * 1000, 3)
+
+
+def _per_unit(product: dict) -> str:
+    """Open Food Facts' "_100g" values follow the label, which is per 100 ml for
+    a product sold by volume (a 330 ml cola: "product_quantity_unit": "ml",
+    28 Nov 2026). Anything else, or no unit, is per 100 g."""
+    unit = str(product.get("product_quantity_unit") or "").strip().lower()
+    return "ml" if unit == "ml" else "g"
 
 
 def _result_from_product(product: dict) -> FoodSearchResult | None:
@@ -75,6 +83,7 @@ def _result_from_product(product: dict) -> FoodSearchResult | None:
         sodium_mg_per_100g=_milligrams(nutriments, "sodium_100g"),
         iron_mg_per_100g=_milligrams(nutriments, "iron_100g"),
         calcium_mg_per_100g=_milligrams(nutriments, "calcium_100g"),
+        per_unit=_per_unit(product),
     )
 
 

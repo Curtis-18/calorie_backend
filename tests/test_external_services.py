@@ -186,3 +186,58 @@ def test_usda_negative_carbs_by_difference_is_read_as_zero():
     assert out["fat_g"] is None, "unknown stays unknown, not zero"
     extras = _extract_extras({"foodNutrients": _nutrients(("Sugars, total including NLEA", "G", -0.3))})
     assert all(v is None or v >= 0 for v in extras.values())
+
+
+# --- drinks: USDA Branded liquids are per 100 ml (NEXT_STEPS step 5) ----------
+
+@pytest.mark.parametrize(
+    "data_type, unit, expected",
+    [
+        ("Branded", "ml", "ml"),          # live orange juice search, 28 Nov 2026
+        ("Branded", "MLT", "ml"),         # the GS1 code form
+        ("Branded", " Milliliter ", "ml"),
+        ("Branded", "g", "g"),
+        ("Branded", "GRM", "g"),
+        ("Branded", None, "g"),           # field missing
+        ("Foundation", "ml", "g"),        # lab data is always per 100 g
+        ("SR Legacy", None, "g"),
+    ],
+)
+def test_what_the_per_100_numbers_are_per(data_type, unit, expected):
+    from app.services.usda_service import _per_unit
+
+    food = {"dataType": data_type}
+    if unit is not None:
+        food["servingSizeUnit"] = unit
+    assert _per_unit(food) == expected
+
+
+async def test_a_branded_juice_search_result_says_per_100_ml(monkeypatch):
+    import httpx
+
+    from app.services import usda_service
+
+    payload = {"foods": [
+        {"fdcId": 7, "description": "ORANGE JUICE", "dataType": "Branded", "servingSizeUnit": "ml",
+         "servingSize": 240.0, "foodNutrients": [_n("Energy", "KCAL", 46.0), _n("Carbohydrate, by difference", "G", 10.8)]},
+        {"fdcId": 8, "description": "Orange juice, raw", "dataType": "SR Legacy",
+         "foodNutrients": [_n("Energy", "KCAL", 45.0), _n("Carbohydrate, by difference", "G", 10.4)]},
+    ]}
+    real = httpx.AsyncClient
+
+    def fake_client(*a, **kw):
+        kw["transport"] = httpx.MockTransport(lambda r: httpx.Response(200, json=payload))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(usda_service.httpx, "AsyncClient", fake_client)
+    results = await usda_service.search_foods("orange juice")
+    assert [(r.fdc_id, r.per_unit) for r in results] == [(7, "ml"), (8, "g")]
+    assert results[0].model_dump()["per_unit"] == "ml", "sent to the app"
+
+
+def test_older_apps_still_get_the_same_field_names():
+    """per_unit is new; the per-100 fields keep their names so an old app reads them as before."""
+    from app.models.food import FoodSearchResult
+
+    out = FoodSearchResult(fdc_id=1, description="x", calories_per_100g=46.0).model_dump()
+    assert out["calories_per_100g"] == 46.0 and out["per_unit"] == "g"
