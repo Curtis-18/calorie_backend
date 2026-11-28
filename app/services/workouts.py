@@ -78,6 +78,23 @@ EXERCISES: dict[str, tuple[str, str]] = {
 }
 
 
+# A gentler version of a move, for the player's "Easier version" button
+# (NEXT_STEPS step 9a). Only moves already in this library, so no new text to
+# translate: move id -> (gentler move id, its amount kind or None for the same
+# kind, how much of the amount). "The same move, shorter" keeps the move and
+# halves the time. A move without an entry simply has no easier version.
+EASIER: dict[str, tuple[str, str | None, float]] = {
+    "knee_pushup": ("wall_pushup", None, 1.0),
+    "reverse_lunge": ("squat", "reps", 1.0),   # 8 lunges each side -> 8 squats
+    "knee_lift": ("march", None, 1.0),
+    "step_jack": ("step_touch", None, 1.0),
+    "brisk_walk": ("easy_walk", None, 1.0),
+    "plank": ("plank", None, 0.5),             # the same hold, half as long
+    "wall_sit": ("wall_sit", None, 0.5),
+}
+MIN_EASIER_SECONDS = 10
+
+
 @dataclass(frozen=True)
 class Step:
     exercise: str
@@ -389,9 +406,35 @@ def library(lang: str = "en") -> dict:
     return {"routines": [card(r, lang) for r in ordered], "slices": list(SLICES)}
 
 
+def easier_step(step: Step) -> Step | None:
+    """The gentler version of [step] from EASIER, or None when it has none."""
+    found = EASIER.get(step.exercise)
+    if found is None:
+        return None
+    exercise, kind, share = found
+    kind = kind or step.kind
+    n = round(step.n * share)
+    if kind in ("secs", "secs_side"):
+        n = min(step.n, max(n, MIN_EASIER_SECONDS))
+    return Step(exercise, kind, max(n, 1))
+
+
 def _play_entries(lang: str, section: str, step: Step, round_no: int | None) -> list[dict]:
-    """One step as what the player shows. A step done on each side becomes two
-    timed steps; a rep step stays one (the amount already says "each side")."""
+    """One step as what the player shows, each entry with its "easier" version
+    (or None). Old apps ignore "easier"."""
+    entries = _plain_entries(lang, section, step, round_no)
+    gentler = easier_step(step)
+    easier = _plain_entries(lang, section, gentler, round_no) if gentler else []
+    keep = ("name", "cue", "amount", "mode", "seconds", "reps")
+    for i, entry in enumerate(entries):
+        match = easier[min(i, len(easier) - 1)] if easier else None
+        entry["easier"] = {k: match[k] for k in keep} if match else None
+    return entries
+
+
+def _plain_entries(lang: str, section: str, step: Step, round_no: int | None) -> list[dict]:
+    """A step done on each side becomes two timed steps; a rep step stays one
+    (the amount already says "each side")."""
     name, cue = EXERCISES[step.exercise]
     base = {
         "section": section, "round": round_no, "name": t(lang, name), "cue": t(lang, cue),
@@ -419,7 +462,7 @@ def play_steps(routine: Routine, lang: str = "en") -> list[dict]:
             out.append({
                 "section": "main", "round": round_no, "mode": "rest", "name": t(lang, REST_LABEL), "cue": "",
                 "amount": t(lang, AMOUNTS["secs"], n=REST_SECONDS_PER_ROUND),
-                "seconds": REST_SECONDS_PER_ROUND, "reps": None, "side": None,
+                "seconds": REST_SECONDS_PER_ROUND, "reps": None, "side": None, "easier": None,
             })
     for step in routine.cool:
         out += _play_entries(lang, "cool", step, None)

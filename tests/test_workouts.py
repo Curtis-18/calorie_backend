@@ -240,3 +240,67 @@ def test_one_workout_comes_with_its_player_steps_and_a_missing_one_is_404(client
 def test_the_route_speaks_the_language_in_the_header(client):
     r = client.get("/workouts/walk_10", headers={"Accept-Language": "es"})
     assert r.json()["name"] == "Caminata de 10 minutos"
+
+
+# ---- "Easier version" in the player (NEXT_STEPS step 9a) ------------------------------------------
+
+def test_every_easier_version_is_a_move_from_the_library():
+    for move, (gentler, kind, share) in workouts.EASIER.items():
+        assert move in workouts.EXERCISES and gentler in workouts.EXERCISES, move
+        assert kind is None or kind in workouts.AMOUNTS
+        assert 0 < share <= 1
+        if gentler == move:
+            assert share < 1, f"{move}: the same move must at least be shorter"
+
+
+def test_the_easier_version_is_never_longer_than_the_usual_one():
+    for r in workouts.ROUTINES:
+        for step in (*r.warm, *r.main, *r.cool):
+            gentler = workouts.easier_step(step)
+            if gentler is None:
+                continue
+            assert gentler.n <= step.n, (r.id, step)
+            if gentler.kind in ("secs", "secs_side"):
+                assert gentler.n >= min(step.n, workouts.MIN_EASIER_SECONDS)
+
+
+def test_a_knee_push_up_can_be_a_wall_push_up_and_a_lunge_a_squat():
+    steps = workouts.play_steps(workouts.get("strength_30"))
+    by_name = {s["name"]: s for s in steps}
+    knee = by_name.get("Knee push-up")
+    lunge = by_name.get("Reverse lunge")
+    assert knee and lunge, "strength_30 has both moves"
+    assert knee["easier"]["name"] == "Wall push-up" and knee["easier"]["reps"] == knee["reps"]
+    assert lunge["easier"]["name"] == "Bodyweight squat" and lunge["easier"]["mode"] == "reps"
+    assert lunge["easier"]["amount"] == f"{lunge['reps']} reps", "squats are not 'each side'"
+
+
+def test_a_plank_gets_shorter_but_never_below_ten_seconds():
+    assert workouts.easier_step(workouts.Step("plank", "secs", 30)) == workouts.Step("plank", "secs", 15)
+    assert workouts.easier_step(workouts.Step("plank", "secs", 16)) == workouts.Step("plank", "secs", 10)
+    assert workouts.easier_step(workouts.Step("plank", "secs", 8)) == workouts.Step("plank", "secs", 8)
+    assert workouts.easier_step(workouts.Step("squat", "reps", 10)) is None
+
+
+def test_every_player_entry_says_whether_it_has_an_easier_version():
+    for r in workouts.ROUTINES:
+        for s in workouts.play_steps(r):
+            assert "easier" in s, r.id
+            if s["mode"] == "rest":
+                assert s["easier"] is None
+            if s["easier"] is not None:
+                e = s["easier"]
+                assert e["mode"] in ("timed", "reps") and set(e) == {"name", "cue", "amount", "mode", "seconds", "reps"}
+                assert (e["seconds"] or 0) > 0 if e["mode"] == "timed" else (e["reps"] or 0) > 0
+
+
+def test_the_easier_version_is_in_the_persons_language_and_never_about_calories():
+    for lang in SUPPORTED:
+        for r in workouts.ROUTINES:
+            for s in workouts.play_steps(r, lang):
+                e = s["easier"]
+                if e:
+                    assert not re.search(r"kcal|calor|burn|earn", f"{e['name']} {e['cue']}", re.I)
+    es = {s["name"]: s for s in workouts.play_steps(workouts.get("strength_30"), "es")}
+    knee = es[workouts.t("es", "Knee push-up")]
+    assert knee["easier"]["name"] == workouts.t("es", "Wall push-up") != "Wall push-up"
