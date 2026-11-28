@@ -11,6 +11,9 @@ class ActivityItemOut(BaseModel):
     emoji: str | None = None
     created_at: datetime
     seen: bool
+    # The bite a "bite" line is about (null for reactions); the app opens it
+    # if it is still in the inbox. Older apps ignore it.
+    snap_id: uuid.UUID | None = None
 
 
 class ActivityOut(BaseModel):

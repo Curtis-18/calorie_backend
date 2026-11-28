@@ -57,9 +57,9 @@ class _Db:
         self.rolled_back = True
 
 
-def row(kind="bite", emoji=None, seen=False, who="sam", minutes=0):
+def row(kind="bite", emoji=None, seen=False, who="sam", minutes=0, key=None):
     return SimpleNamespace(id=uuid.uuid4(), kind=kind, emoji=emoji, created_at=NOW - timedelta(minutes=minutes),
-                           seen_at=NOW if seen else None, username=who)
+                           seen_at=NOW if seen else None, username=who, dedupe_key=key)
 
 
 # --- reading ------------------------------------------------------------------
@@ -72,6 +72,23 @@ async def test_the_list_has_the_lines_and_the_unseen_count():
         ("reaction", "bea", "🔥", False),
         ("bite", "sam", None, True),
     ]
+
+
+def test_the_bite_id_comes_only_from_a_bite_lines_own_key():
+    snap = uuid.uuid4()
+    assert activity.bite_id("bite", f"snap:{snap}") == snap
+    assert activity.bite_id("reaction", f"react:{snap}:{SAM}:🔥") is None
+    assert activity.bite_id("reaction", f"snap:{snap}") is None
+    for odd in (None, "", "snap:", "snap:not-a-uuid", f"other:{snap}"):
+        assert activity.bite_id("bite", odd) is None, odd
+
+
+@pytest.mark.asyncio
+async def test_the_list_says_which_bite_each_bite_line_is_about():
+    snap = uuid.uuid4()
+    rows = [row(key=f"snap:{snap}"), row("reaction", "🔥", key=f"react:{snap}:{SAM}:🔥"), row(key=None)]
+    out = await activity.feed(_Db(_Result(rows=rows), _Result(scalar=0)), ME, now=NOW)
+    assert [i["snap_id"] for i in out["items"]] == [snap, None, None]
 
 
 @pytest.mark.asyncio
@@ -184,7 +201,14 @@ def test_the_route_returns_the_list(client):
     assert r.status_code == 200
     body = r.json()
     assert body["unread"] == 1 and body["items"][0]["kind"] == "reaction" and body["items"][0]["username"] == "bea"
-    assert set(body["items"][0]) == {"id", "kind", "username", "emoji", "created_at", "seen"}
+    assert set(body["items"][0]) == {"id", "kind", "username", "emoji", "created_at", "seen", "snap_id"}
+    assert body["items"][0]["snap_id"] is None
+
+
+def test_a_bite_line_names_its_bite_so_the_app_can_open_it(client):
+    snap = uuid.uuid4()
+    _with_db(_Db(_Result(rows=[row(key=f"snap:{snap}")]), _Result(scalar=1)))
+    assert client.get("/activity").json()["items"][0]["snap_id"] == str(snap)
 
 
 def test_opening_marks_seen_and_answers_204(client):

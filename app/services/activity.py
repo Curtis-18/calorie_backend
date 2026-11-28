@@ -25,6 +25,18 @@ KEEP = timedelta(days=30)
 PAGE = 40
 
 
+def bite_id(kind: str, dedupe_key: str | None) -> uuid.UUID | None:
+    """The bite a "bite" line is about, so the app can open that exact bite.
+    Read from the dedupe key `snap:<id>` that snaps.py has always written, so
+    no new column is needed. Anything else (a reaction, an odd key) is None."""
+    if kind != "bite" or not dedupe_key or not dedupe_key.startswith("snap:"):
+        return None
+    try:
+        return uuid.UUID(dedupe_key[5:])
+    except ValueError:
+        return None
+
+
 async def record(user_id: uuid.UUID, kind: str, actor_id: uuid.UUID, *, emoji: str | None = None, dedupe_key: str | None = None) -> bool:
     """Add a line for [user_id]. Own session, never raises; False if nothing was added."""
     if kind not in KINDS or user_id == actor_id:
@@ -60,7 +72,10 @@ async def feed(db: AsyncSession, user_id: uuid.UUID, *, now: datetime | None = N
         async with db.begin_nested():
             rows = (
                 await db.execute(
-                    select(Activity.id, Activity.kind, Activity.emoji, Activity.created_at, Activity.seen_at, Profile.username)
+                    select(
+                        Activity.id, Activity.kind, Activity.emoji, Activity.created_at, Activity.seen_at, Activity.dedupe_key,
+                        Profile.username,
+                    )
                     .join(Profile, Profile.id == Activity.actor_id)
                     .where(*_visible(user_id, since))
                     .order_by(Activity.created_at.desc())
@@ -79,7 +94,10 @@ async def feed(db: AsyncSession, user_id: uuid.UUID, *, now: datetime | None = N
         unread = 0
     return {
         "items": [
-            {"id": r.id, "kind": r.kind, "username": r.username or "", "emoji": r.emoji, "created_at": r.created_at, "seen": r.seen_at is not None}
+            {
+                "id": r.id, "kind": r.kind, "username": r.username or "", "emoji": r.emoji, "created_at": r.created_at,
+                "seen": r.seen_at is not None, "snap_id": bite_id(r.kind, getattr(r, "dedupe_key", None)),
+            }
             for r in rows
         ],
         "unread": unread,
