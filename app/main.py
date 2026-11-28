@@ -42,7 +42,10 @@ def cors_kwargs(cors: Settings) -> dict:
         "allow_origins": cors.exact_origins,
         "allow_origin_regex": cors.cors_origin_regex,
         "allow_credentials": True,
-        "allow_methods": ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        # PUT: the app saves Highlights (PUT /highlights) and recipe photos
+        # (PUT /recipes/{id}/media/{n}) with it. Without it a direct browser
+        # call's preflight was refused ("400 Disallowed CORS method", 26 Nov).
+        "allow_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         "allow_headers": ["Authorization", "Content-Type"],
     }
 

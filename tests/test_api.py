@@ -854,3 +854,24 @@ def test_cors_allows_patch():
     from app.main import cors_kwargs
 
     assert "PATCH" in cors_kwargs(settings)["allow_methods"]
+
+
+def test_cors_allows_put():
+    """Highlights and recipe photos are saved with PUT; a browser asks first."""
+    from app.core.config import settings
+    from app.main import cors_kwargs
+
+    assert "PUT" in cors_kwargs(settings)["allow_methods"]
+
+
+def test_a_put_preflight_from_the_app_passes(anon_client):
+    r = anon_client.options(
+        "/highlights",
+        headers={
+            "Origin": "https://app.example.com",  # in CORS_ORIGINS set by tests/conftest.py
+            "Access-Control-Request-Method": "PUT",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert r.status_code == 200
+    assert "PUT" in r.headers["access-control-allow-methods"]
