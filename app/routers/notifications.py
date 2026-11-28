@@ -272,7 +272,8 @@ async def streak_reminders(background: BackgroundTasks, x_cron_secret: str | Non
 
     The work (see _send_reminders) sends what is due for each person at their
     own local time, each at most once a day, always through the daily cap,
-    quiet hours and switches.
+    quiet hours and switches. Then it deletes bites and stories older than
+    24 hours (_purge_expired_photos).
     Disabled until CRON_SECRET is set. The path keeps its old name so an
     existing schedule keeps working.
     """
@@ -301,12 +302,28 @@ async def _run_job(now: datetime) -> None:
             log.exception("cron job failed")
             return
         _hour_done = hour
+        results["purged"] = await _purge_expired_photos()
         last_run.clear()
         last_run.update(results)
         log.info(
-            "cron job done checked=%s sent=%s secs=%.1f",
-            results["checked"], results["sent"], time.monotonic() - started,
+            "cron job done checked=%s sent=%s purged=%s secs=%.1f",
+            results["checked"], results["sent"], results["purged"], time.monotonic() - started,
         )
+
+
+async def _purge_expired_photos() -> int:
+    """Delete bites and stories past their 24 hours (photos and rows). The
+    privacy page promises that, and until 28 Nov it only happened when someone
+    opened their inbox or the stories feed, or if a separate /snaps/purge job
+    existed (nobody knew whether one did). Never raises; 0 when storage isn't
+    set up (no SUPABASE_SERVICE_ROLE_KEY), so the log isn't filled with errors."""
+    from app.routers.snaps import purge_expired
+    from app.routers.stories import purge_expired_stories
+    from app.services import storage_service
+
+    if not storage_service.configured():
+        return 0
+    return await purge_expired(limit=500) + await purge_expired_stories(limit=500)
 
 
 async def _send_reminders(db: AsyncSession, now: datetime) -> dict:

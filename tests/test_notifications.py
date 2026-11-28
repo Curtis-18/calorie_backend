@@ -296,6 +296,11 @@ def _job_session(db, monkeypatch):
 
     monkeypatch.setattr(router, "async_session_maker", lambda: _Session())
     monkeypatch.setattr(router, "_hour_done", None)
+
+    async def no_purge():
+        return 0
+
+    monkeypatch.setattr(router, "_purge_expired_photos", no_purge)
     router.last_run.clear()
     return router
 
@@ -377,7 +382,7 @@ def test_the_streak_cron_with_nobody_registered_does_nothing(client, monkeypatch
     router = _job_session(_Db(_Result(rows=[]), _Result()), monkeypatch)  # no device owners; log cleanup
     r = client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
     assert r.status_code == 202 and r.json() == {"status": "started"}
-    assert router.last_run == {"checked": 0, "sent": 0}
+    assert router.last_run == {"checked": 0, "sent": 0, "purged": 0}
 
 
 def test_the_job_answers_at_once_and_works_afterwards(client, monkeypatch):
@@ -406,7 +411,7 @@ def test_get_works_too_because_it_is_cron_job_orgs_default(client, monkeypatch):
     router = _job_session(_Db(_Result(rows=[]), _Result()), monkeypatch)
     assert client.get("/notifications/cron/streak-reminders").status_code == 403
     r = client.get("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
-    assert r.status_code == 202 and router.last_run == {"checked": 0, "sent": 0}
+    assert r.status_code == 202 and router.last_run == {"checked": 0, "sent": 0, "purged": 0}
 
 
 def test_a_second_call_while_a_run_is_going_does_not_start_another(client, monkeypatch):
@@ -444,10 +449,10 @@ def test_calls_every_10_minutes_do_the_work_once_an_hour(client, monkeypatch):
 
     _job_session(_Db(), monkeypatch)
     monkeypatch.setattr(router, "async_session_maker", lambda: _SessionFor(sessions[-1]))
-    assert run_at(12, 0) == {"checked": 0, "sent": 0}
+    assert run_at(12, 0) == {"checked": 0, "sent": 0, "purged": 0}
     assert run_at(12, 10) == {}, "same hour: no work, the call only kept the server awake"
     assert run_at(12, 50) == {}
-    assert run_at(13, 0) == {"checked": 0, "sent": 0}, "a new hour: the work runs again"
+    assert run_at(13, 0) == {"checked": 0, "sent": 0, "purged": 0}, "a new hour: the work runs again"
 
 
 def test_a_failed_run_is_tried_again_on_the_next_call(client, monkeypatch):
@@ -468,7 +473,7 @@ def test_a_failed_run_is_tried_again_on_the_next_call(client, monkeypatch):
     monkeypatch.setattr(router, "async_session_maker", lambda: _SessionFor(_Db(_Result(rows=[]), _Result())))
     monkeypatch.setattr(router, "_utcnow", lambda: at(12, 10))
     client.post("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
-    assert router.last_run == {"checked": 0, "sent": 0}
+    assert router.last_run == {"checked": 0, "sent": 0, "purged": 0}
 
 
 class _SessionFor:
@@ -797,7 +802,7 @@ def test_the_hourly_job_sends_a_badge_unlocked_today_in_the_persons_language(cli
     from app.i18n import t
 
     r, calls, loads, _ = _cron(client, monkeypatch, hour=12, inputs=_inputs([_log(DAY)]), lang="es")
-    assert r.status_code == 200 and r.json() == {"checked": 1, "sent": 1}
+    assert r.status_code == 200 and r.json() == {"checked": 1, "sent": 1, "purged": 0}
     assert loads == [DAY]
     assert calls == [(Kind.MILESTONE, "badge:first_bite", {"name": t("es", "First Bite"), "variant": BADGE_LINE})]
 
@@ -806,7 +811,7 @@ def test_the_hourly_job_moves_past_one_already_sent_and_sends_at_most_one(client
     rows = [_log(DAY, source="photo")]  # first_bite and snapshot, both today
     r, calls, _, _ = _cron(client, monkeypatch, hour=12, inputs=_inputs(rows), statuses=("duplicate", "dry_run"))
     assert [key for _, key, _ in calls] == ["badge:first_bite", "badge:snapshot"]
-    assert r.json() == {"checked": 1, "sent": 1}
+    assert r.json() == {"checked": 1, "sent": 1, "purged": 0}
 
 
 def test_the_rules_saying_no_stops_the_run_for_that_person(client, monkeypatch):
@@ -817,7 +822,7 @@ def test_the_rules_saying_no_stops_the_run_for_that_person(client, monkeypatch):
 
 def test_nothing_is_loaded_outside_the_daytime_window(client, monkeypatch):
     r, calls, loads, _ = _cron(client, monkeypatch, hour=9, inputs=_inputs([_log(DAY)]))
-    assert r.json() == {"checked": 0, "sent": 0} and loads == [] and calls == []
+    assert r.json() == {"checked": 0, "sent": 0, "purged": 0} and loads == [] and calls == []
 
 
 def _prefs(**over):
@@ -861,3 +866,47 @@ async def test_notify_passes_the_chosen_line_through(sent):
         db = _Db(_Result(rows=["tok-1"]), _Result(None), _Result(0), _Result(ME), _Result())
         assert await _notify(db, Kind.MILESTONE, dedupe_key=key, count=4, variant=LEVEL_LINE) == "dry_run"
         assert sent[0][1] == "⭐ Level 4!", key
+
+
+
+def test_the_hourly_work_also_deletes_expired_bites_and_stories(client, monkeypatch):
+    """The privacy page promises removal after 24 hours; before 28 Nov that only happened
+    when someone opened their inbox or stories (or if a separate job existed)."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "cron_secret", "s3cret")
+    router = _job_session(_Db(_Result(rows=[]), _Result()), monkeypatch)
+    ran = []
+
+    async def purge():
+        ran.append(True)
+        return 7
+
+    monkeypatch.setattr(router, "_purge_expired_photos", purge)
+    client.get("/notifications/cron/streak-reminders", headers={"X-Cron-Secret": "s3cret"})
+    assert ran == [True] and router.last_run["purged"] == 7
+
+
+async def test_purging_asks_both_kinds_and_skips_when_storage_is_not_set_up(monkeypatch):
+    from app.routers import notifications as router
+    from app.routers import snaps, stories
+    from app.services import storage_service
+
+    asked = []
+
+    async def snaps_purge(limit=100):
+        asked.append(("snaps", limit))
+        return 2
+
+    async def stories_purge(limit=100):
+        asked.append(("stories", limit))
+        return 3
+
+    monkeypatch.setattr(snaps, "purge_expired", snaps_purge)
+    monkeypatch.setattr(stories, "purge_expired_stories", stories_purge)
+    monkeypatch.setattr(storage_service, "configured", lambda: True)
+    assert await router._purge_expired_photos() == 5
+    assert asked == [("snaps", 500), ("stories", 500)]
+    asked.clear()
+    monkeypatch.setattr(storage_service, "configured", lambda: False)
+    assert await router._purge_expired_photos() == 0 and asked == []
