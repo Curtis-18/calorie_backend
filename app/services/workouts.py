@@ -425,7 +425,7 @@ def _play_entries(lang: str, section: str, step: Step, round_no: int | None) -> 
     entries = _plain_entries(lang, section, step, round_no)
     gentler = easier_step(step)
     easier = _plain_entries(lang, section, gentler, round_no) if gentler else []
-    keep = ("name", "cue", "amount", "mode", "seconds", "reps")
+    keep = ("move", "name", "cue", "amount", "mode", "seconds", "reps")
     for i, entry in enumerate(entries):
         match = easier[min(i, len(easier) - 1)] if easier else None
         entry["easier"] = {k: match[k] for k in keep} if match else None
@@ -437,7 +437,8 @@ def _plain_entries(lang: str, section: str, step: Step, round_no: int | None) ->
     (the amount already says "each side")."""
     name, cue = EXERCISES[step.exercise]
     base = {
-        "section": section, "round": round_no, "name": t(lang, name), "cue": t(lang, cue),
+        # The move's id, for "Last time" (NEXT_STEPS 9b); names are translated, ids never are.
+        "section": section, "round": round_no, "move": step.exercise, "name": t(lang, name), "cue": t(lang, cue),
         "amount": t(lang, AMOUNTS[step.kind], n=step.n),
     }
     if step.kind == "secs":
@@ -460,7 +461,7 @@ def play_steps(routine: Routine, lang: str = "en") -> list[dict]:
             out += _play_entries(lang, "main", step, round_no)
         if routine.rounds > 1:
             out.append({
-                "section": "main", "round": round_no, "mode": "rest", "name": t(lang, REST_LABEL), "cue": "",
+                "section": "main", "round": round_no, "mode": "rest", "move": None, "name": t(lang, REST_LABEL), "cue": "",
                 "amount": t(lang, AMOUNTS["secs"], n=REST_SECONDS_PER_ROUND),
                 "seconds": REST_SECONDS_PER_ROUND, "reps": None, "side": None, "easier": None,
             })

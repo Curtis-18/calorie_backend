@@ -17,7 +17,7 @@ from app.core.security import get_current_user_id
 from app.models.movement import MovementLog, MovementPrefs
 from app.models.weight_log import WeightLog
 from app.schemas.movement import MovementIn, MovementOut, WeekOut
-from app.services import movement, movement_read, workouts
+from app.services import movement, movement_read, movement_sets, workouts
 
 log = logging.getLogger("calorie_backend")
 
@@ -87,8 +87,13 @@ async def log_movement(
         "minutes": data.minutes, "intensity": intensity, "routine_id": routine_id, "source": source,
         "est_kcal": movement.estimate_kcal(activity, intensity, data.minutes, weight),
     }
+    sets = movement_sets.clean_sets(data.sets) if source == "session" else []
     try:
-        await db.execute(pg_insert(MovementLog).values(row).on_conflict_do_nothing())
+        inserted = await db.execute(pg_insert(MovementLog).values(row).on_conflict_do_nothing().returning(MovementLog.id))
+        # Only with the session that was just written (never twice for a retry
+        # that raced the first attempt), and in a savepoint: no table, no sets.
+        if sets and inserted.scalar_one_or_none() is not None:
+            await movement_sets.save(db, user_id, data.id, sets)
         await db.commit()
     except Exception:  # noqa: BLE001
         await db.rollback()

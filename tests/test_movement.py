@@ -229,6 +229,59 @@ def test_logging_a_guided_session_takes_its_slice_and_effort_from_the_routine(cl
     assert db.committed and any("INSERT INTO movement_logs" in s for s in db.statements)
 
 
+def test_a_session_saves_its_sets_once_with_library_moves_only(client):
+    mid = uuid.uuid4()
+    db = _Db(_Result(None), _Result(70.0), _Result(mid), _Result())  # no row, weight, insert (new), sets
+    _with_db(db)
+    sets = [{"move": "squat", "reps": 12}, {"move": "teleport", "reps": 5}, {"move": "knee_pushup", "reps": 6}]
+    r = client.post("/movement", json={"id": str(mid), "routine_id": "strength_30", "minutes": 28, "sets": sets})
+    assert r.status_code == 200 and db.committed
+    assert any("INSERT INTO movement_sets" in s for s in db.statements)
+    assert sum("INSERT INTO movement_sets" in s for s in db.statements) == 1
+
+
+def test_sets_are_not_written_when_the_session_was_already_there_or_logged_by_hand(client):
+    # The insert found the id already taken (a retry raced the first attempt): no second copy of the sets.
+    db = _Db(_Result(None), _Result(70.0), _Result(None))
+    _with_db(db)
+    body = {"id": str(uuid.uuid4()), "routine_id": "strength_30", "minutes": 28, "sets": [{"move": "squat", "reps": 12}]}
+    assert client.post("/movement", json=body).status_code == 200
+    assert not any("movement_sets" in s for s in db.statements)
+    # By hand: there are no sets to keep.
+    db = _Db(_Result(None), _Result(70.0), _Result(uuid.uuid4()))
+    _with_db(db)
+    body = {"id": str(uuid.uuid4()), "activity": "walk", "minutes": 20, "sets": [{"move": "squat", "reps": 12}]}
+    assert client.post("/movement", json=body).status_code == 200
+    assert not any("movement_sets" in s for s in db.statements)
+
+
+def test_before_the_migration_a_session_with_sets_still_saves(client):
+    class NoSetsTable(_Db):
+        async def execute(self, stmt):
+            if "movement_sets" in str(stmt):
+                self.statements.append(str(stmt))
+                raise RuntimeError('relation "movement_sets" does not exist')
+            return await super().execute(stmt)
+
+    mid = uuid.uuid4()
+    db = NoSetsTable(_Result(None), _Result(70.0), _Result(mid))
+    _with_db(db)
+    body = {"id": str(mid), "routine_id": "strength_30", "minutes": 28, "sets": [{"move": "squat", "reps": 12}]}
+    r = client.post("/movement", json=body)
+    assert r.status_code == 200 and db.committed and r.json()["routine_id"] == "strength_30"
+
+
+@pytest.mark.parametrize("sets", [
+    [{"move": "squat", "reps": 0}], [{"move": "squat", "reps": 501}], [{"move": "squat", "reps": "12"}],
+    [{"move": "squat", "reps": 1e300}], [{"move": "x" * 41, "reps": 3}], [{"move": "squat", "reps": 3}] * 101,
+])
+def test_odd_sets_are_refused_before_anything_is_written(client, sets):
+    db = _Db(_Result(None))
+    _with_db(db)
+    body = {"id": str(uuid.uuid4()), "routine_id": "strength_30", "minutes": 28, "sets": sets}
+    assert client.post("/movement", json=body).status_code == 422 and not db.committed
+
+
 def test_logging_by_hand_needs_an_activity_from_the_list(client):
     _with_db(_Db(_Result(None)))
     assert client.post("/movement", json={"id": str(uuid.uuid4()), "activity": "teleport", "minutes": 10}).status_code == 422

@@ -6,6 +6,13 @@ from pydantic import BaseModel, Field, field_validator
 from app.services import movement
 
 
+class SetIn(BaseModel):
+    """One set of a rep move in a guided session (NEXT_STEPS 9b)."""
+
+    move: str = Field(..., max_length=40)
+    reps: int = Field(..., ge=1, le=500, strict=True)
+
+
 class MovementIn(BaseModel):
     id: uuid.UUID = Field(..., description="Chosen by the app so a retry cannot log twice")
     # A guided routine (its slice and effort come from the library), or a kind
@@ -16,6 +23,9 @@ class MovementIn(BaseModel):
     intensity: str | None = None
     # The person's own day (device-local); the server's UTC date when absent.
     date: date_type | None = None
+    # Guided sessions only: how many reps of each move were done, for "Last
+    # time" next time. Optional; older apps don't send it.
+    sets: list[SetIn] | None = Field(default=None, max_length=100)
 
     @field_validator("intensity")
     @classmethod

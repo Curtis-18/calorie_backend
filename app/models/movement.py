@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy import Column, Date, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.sql import func
@@ -32,3 +34,20 @@ class MovementPrefs(Base):
     user_id = Column(PGUUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True)
     eat_back_percent = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MovementSet(Base):
+    """How many reps of one move someone did in a guided session, for "Last
+    time: 12" in the player (NEXT_STEPS 9b). Own table (migration
+    2026-11-29_movement_sets.sql): read and written in savepoints, so a server
+    without it saves sessions exactly as before."""
+
+    __tablename__ = "movement_sets"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    log_id = Column(PGUUID(as_uuid=True), ForeignKey("movement_logs.id", ondelete="CASCADE"), nullable=False)
+    move = Column(String, nullable=False)  # a key of workouts.EXERCISES
+    reps = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+

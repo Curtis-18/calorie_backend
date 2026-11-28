@@ -228,6 +228,7 @@ def test_the_library_route_needs_a_login_and_lists_routines(client):
 
 
 def test_one_workout_comes_with_its_player_steps_and_a_missing_one_is_404(client):
+    _with_db(_Db())
     r = client.get("/workouts/walk_10")
     assert r.status_code == 200
     body = r.json()
@@ -238,6 +239,7 @@ def test_one_workout_comes_with_its_player_steps_and_a_missing_one_is_404(client
 
 
 def test_the_route_speaks_the_language_in_the_header(client):
+    _with_db(_Db())
     r = client.get("/workouts/walk_10", headers={"Accept-Language": "es"})
     assert r.json()["name"] == "Caminata de 10 minutos"
 
@@ -290,7 +292,7 @@ def test_every_player_entry_says_whether_it_has_an_easier_version():
                 assert s["easier"] is None
             if s["easier"] is not None:
                 e = s["easier"]
-                assert e["mode"] in ("timed", "reps") and set(e) == {"name", "cue", "amount", "mode", "seconds", "reps"}
+                assert e["mode"] in ("timed", "reps") and set(e) == {"move", "name", "cue", "amount", "mode", "seconds", "reps"}
                 assert (e["seconds"] or 0) > 0 if e["mode"] == "timed" else (e["reps"] or 0) > 0
 
 
@@ -304,3 +306,120 @@ def test_the_easier_version_is_in_the_persons_language_and_never_about_calories(
     es = {s["name"]: s for s in workouts.play_steps(workouts.get("strength_30"), "es")}
     knee = es[workouts.t("es", "Knee push-up")]
     assert knee["easier"]["name"] == workouts.t("es", "Wall push-up") != "Wall push-up"
+
+
+# ---- "Last time: 12" (NEXT_STEPS step 9b) ---------------------------------------------------------
+
+class _Result:
+    def __init__(self, rows=None):
+        self.rows = rows or []
+
+    def all(self):
+        return self.rows
+
+
+class _Nested:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _Db:
+    def __init__(self, *results, fail=False):
+        self.results, self.statements, self.fail = list(results), [], fail
+
+    def begin_nested(self):
+        return _Nested()
+
+    async def execute(self, stmt):
+        self.statements.append(str(stmt))
+        if self.fail:
+            raise RuntimeError('relation "movement_sets" does not exist')
+        return self.results.pop(0)
+
+
+def _with_db(db):
+    from app.core.database import get_db
+    from app.main import app
+
+    async def fake_db():
+        yield db
+
+    app.dependency_overrides[get_db] = fake_db
+
+
+def test_every_player_step_names_its_move_by_id_and_rests_have_none():
+    for r in workouts.ROUTINES:
+        for lang in ("en", "de"):
+            for s in workouts.play_steps(r, lang):
+                if s["mode"] == "rest":
+                    assert s["move"] is None
+                else:
+                    assert s["move"] in workouts.EXERCISES, (r.id, s)
+                if s["easier"]:
+                    assert s["easier"]["move"] in workouts.EXERCISES
+
+
+def test_last_time_is_the_best_set_of_the_most_recent_session_with_that_move():
+    from app.services.movement_sets import latest_by_move
+
+    rows = [  # newest first
+        ("squat", 10, "s3"), ("squat", 12, "s3"), ("glute_bridge", 8, "s3"),
+        ("squat", 20, "s2"), ("knee_pushup", 6, "s2"),
+        ("knee_pushup", 9, "s1"),
+    ]
+    assert latest_by_move(rows) == {"squat": 12, "glute_bridge": 8, "knee_pushup": 6}
+    assert latest_by_move([]) == {}
+
+
+def test_only_library_moves_are_kept_and_nothing_is_refused_for_an_odd_one():
+    from app.schemas.movement import SetIn
+    from app.services.movement_sets import clean_sets
+
+    sets = [SetIn(move="squat", reps=12), SetIn(move="teleport", reps=3), SetIn(move="wall_pushup", reps=8)]
+    assert clean_sets(sets) == [("squat", 12), ("wall_pushup", 8)]
+    assert clean_sets(None) == []
+
+
+def test_a_workout_comes_with_last_time_for_its_rep_moves_only(client):
+    db = _Db(_Result([("squat", 12, "s1"), ("knee_pushup", 6, "s1")]))
+    _with_db(db)
+    body = client.get("/workouts/strength_30").json()
+    assert body["last_reps"] == {"squat": 12, "knee_pushup": 6}
+    sql = db.statements[0]
+    assert "movement_sets" in sql and "user_id" in sql and "LIMIT" in sql
+
+
+
+def test_last_time_is_asked_for_each_rep_move_and_its_easier_version(client, monkeypatch):
+    from app.routers import workouts as route
+
+    asked = []
+
+    async def fake_last(db, uid, moves):
+        asked.append(set(moves))
+        return {}
+
+    monkeypatch.setattr(route.movement_sets, "last_reps", fake_last)
+    _with_db(_Db())
+    client.get("/workouts/strength_30")
+    routine = workouts.get("strength_30")
+    reps_moves = {s.exercise for s in (*routine.warm, *routine.main, *routine.cool) if s.kind in ("reps", "reps_side")}
+    assert reps_moves <= asked[0]
+    assert {"wall_pushup", "squat"} <= asked[0], "the easier versions of a knee push-up and a lunge"
+    assert not asked[0] & {"plank", "march", "breathing"}, "timed moves have no reps to remember"
+
+
+def test_before_the_migration_a_workout_still_opens_with_no_last_time(client):
+    _with_db(_Db(fail=True))
+    r = client.get("/workouts/strength_30")
+    assert r.status_code == 200 and r.json()["last_reps"] == {} and r.json()["play"]
+
+
+def test_a_timed_only_workout_does_not_even_ask(client):
+    db = _Db()
+    _with_db(db)
+    assert client.get("/workouts/walk_10").json()["last_reps"] == {} and db.statements == []
+
