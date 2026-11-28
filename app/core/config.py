@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # Ceiling for the base64 photo payload on /estimate-photo.
     max_photo_bytes: int = 8 * 1024 * 1024
 
+    # How database connections are handled (app/core/database.py). "null" (the
+    # default, as before 28 Nov 2026): a new connection for every request, about
+    # 1 s each. "queue": a few connections kept open and reused. Off until the
+    # owner sets DB_POOL=queue on Render; removing it switches back.
+    db_pool: str = "null"
+    db_pool_size: int = 3
+
     @field_validator("database_url")
     @classmethod
     def _force_asyncpg_driver(cls, v: str) -> str:
